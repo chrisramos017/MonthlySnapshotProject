@@ -1,0 +1,1302 @@
+---
+title: "JustForms"
+output:
+  html_document:
+    self_contained: true
+date: "2026-06-16"
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(haven)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Snapshot window shortened to 2024-09-01 .. 2026-03-01.
+snapshot_start <- as.Date("2024-09-01")
+snapshot_end   <- as.Date("2026-03-01")
+policy_date    <- as.Date("2025-09-01")
+```
+
+## Load data
+
+```{r load-data}
+JustFormHRStat1 <- read_sas("/Users/chrisramos/Downloads/JustFormHRStat1.sas7bdat")
+JustFormHRStat2 <- read_sas("/Users/chrisramos/Downloads/JustFormHRStat2.sas7bdat")
+JustFormHRStat3 <- read_sas("/Users/chrisramos/Downloads/JustFormHRStat3.sas7bdat")
+JustFormHRStat4 <- read_sas("/Users/chrisramos/Downloads/JustFormHRStat4.sas7bdat")
+JustFormHR      <- read_sas("/Users/chrisramos/Downloads/JustFormHR.sas7bdat")
+StatHist_Thor   <- read_sas("/Users/chrisramos/Downloads/stathist_thor.sas7bdat")
+JustFormHRDataLink <- read_sas("/Users/chrisramos/Downloads/JustFormHRDataLink.sas7bdat")
+RiskStratDataHR <- read_sas("/Users/chrisramos/Downloads/RiskStratDataHR.sas7bdat")
+
+View(stathist_thor)
+View(JustFormHRStat1)
+```
+
+##Linking Just_ID to PX_ID
+
+```{r}
+justid_px_lookup <- JustFormHRDataLink %>%    #this dataset links JustID and WlregAuditID
+  mutate(
+    JustId = as.character(JustId),
+    WlregAuditId = as.character(WlregAuditId)
+  ) %>%
+
+  select(JustId, WlregAuditId) %>%
+  left_join(
+    RiskStratDataHR %>%                      #this dataset link WlregAuditID to PX_ID
+      mutate(
+        WlregAuditId = as.character(WlregAuditId)
+      ) %>%
+      select(WlregAuditId, px_id),
+    by = "WlregAuditId"                      #join our two simplified tables by common waitlist reg ID
+  ) %>%
+  rename(PX_ID = px_id)
+
+#justid_px_lookup now has all 3 IDs joined by common Wlreg ID; If several JustIds share one WlregAuditId, they all get the same PX_ID
+
+#sanity checks
+
+#shows each just_id has a specific wlregaudit_id accounted for by a each row; as expected some patients have mult. of these ids
+justid_px_lookup %>%
+  summarise(
+    n_rows = n(),
+    n_JustId = n_distinct(JustId),
+    n_WlregAuditId = n_distinct(WlregAuditId),
+    n_PX_ID = n_distinct(PX_ID),
+    missing_px_id = sum(is.na(PX_ID))
+  )
+
+#there are no duplicated just_ids
+justid_px_lookup %>%
+  count(JustId) %>%
+  filter(n > 1)
+
+#checking how many just_ids each px_id has associated with them
+justid_px_lookup %>%
+  group_by(PX_ID) %>%
+  summarise(
+    n_JustId = n_distinct(JustId),
+    n_WlregAuditId = n_distinct(WlregAuditId),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_JustId))
+```
+
+
+## Create monthly snapshots
+
+```{r monthly-snapshots}
+## Monthly snapshot dates now come from status history, not JustForms
+
+month_checkpoints <- seq.Date(
+  from = snapshot_start,
+  to = snapshot_end,
+  by = "month"
+)
+
+add_active_month_snapshots <- function(df) {
+  df %>%
+    mutate(
+      CANHX_BEGIN_DT = as.Date(CANHX_BEGIN_DT),
+      CANHX_END_DT = as.Date(CANHX_END_DT),
+      CAN_REM_DT = as.Date(CAN_REM_DT),
+      CANHX_STAT_CD = as.character(CANHX_STAT_CD),
+      
+      # If no status-history end date exists, use removal date.
+      # If neither exists, assume the status persists through snapshot_end.
+      CANHX_END_DT_adjusted = case_when(
+        !is.na(CANHX_END_DT) ~ CANHX_END_DT,
+        is.na(CANHX_END_DT) & !is.na(CAN_REM_DT) ~ CAN_REM_DT,
+        is.na(CANHX_END_DT) & is.na(CAN_REM_DT) ~ snapshot_end
+      )
+    ) %>%
+    filter(
+      CANHX_BEGIN_DT <= snapshot_end,
+      CANHX_END_DT_adjusted >= snapshot_start
+    ) %>%
+    rowwise() %>%
+    mutate(
+      MonthSnapshot = list(
+        month_checkpoints[
+          month_checkpoints >= CANHX_BEGIN_DT &
+            month_checkpoints <= CANHX_END_DT_adjusted
+        ]
+      )
+    ) %>%
+    ungroup() %>%
+    tidyr::unnest(MonthSnapshot)
+}
+
+## No longer creating MonthSnapshot for JustForms. Using ChangeDate so later we can ask for most recent JustForm as of MonthSnapshot.
+JustFormHRStat1 <- JustFormHRStat1 %>%
+  mutate(
+    JustId = as.character(JustId),
+    ChangeDate = as.Date(ChangeDate)
+  )
+
+JustFormHRStat2 <- JustFormHRStat2 %>%
+  mutate(
+    JustId = as.character(JustId),
+    ChangeDate = as.Date(ChangeDate)
+  )
+
+JustFormHRStat3 <- JustFormHRStat3 %>%
+  mutate(
+    JustId = as.character(JustId),
+    ChangeDate = as.Date(ChangeDate)
+  )
+
+JustFormHRStat4 <- JustFormHRStat4 %>%
+  mutate(
+    JustId = as.character(JustId),
+    ChangeDate = as.Date(ChangeDate)
+  )
+
+JustFormHR <- JustFormHR %>%
+  mutate(
+    JustId = as.character(JustId),
+    ChangeDate = as.Date(ChangeDate)
+  )
+
+#clean JustId -> PX_ID lookup
+justid_px_lookup_clean <- justid_px_lookup %>%
+  mutate(
+    JustId = as.character(JustId),
+    PX_ID = as.character(PX_ID)
+  ) %>%
+  select(JustId, PX_ID) %>%
+  distinct(JustId, .keep_all = TRUE)
+
+#clean JustForm core
+justform_core <- JustFormHR %>%
+  transmute(
+    JustId,
+    RequestedCandStat_descrip,
+    exception = Exception == 1
+  ) %>%
+  distinct(JustId, .keep_all = TRUE)
+
+#build long JustForm table; keeps all forms up to snapshot_end. The most-recent-form-as-of-MonthSnapshot logic (below) will pick the governing form per month, so we retain forms dated before snapshot_start too (a form from, say, early 2024 can still be the most recent one governing 2024-09).
+justform_status_long <- bind_rows(
+  
+  JustFormHRStat1 %>%
+    transmute(
+      JustId,
+      ChangeDate,
+      status_form = "Adult Status 1",
+      ecmo = CriteriaEcmoSupport == 1,
+      iabp = FALSE,
+      endovascular_mcsd = FALSE,
+      lvad = FALSE,
+      lvad_disc = FALSE,        # Status 3 only; FALSE here so bind_rows aligns
+      inotrope_high = FALSE,    # Status 3 only
+      inotrope_low = FALSE      # Status 4 only
+    ),
+  
+  JustFormHRStat2 %>%
+    transmute(
+      JustId,
+      ChangeDate,
+      status_form = "Adult Status 2",
+      ecmo = FALSE,
+      iabp = CriteriaIabpSupport == 1,
+      endovascular_mcsd = CriteriaMcsdEndovasSupp == 1,   # impella == endovascular MCSD (Status 2 only)
+      lvad = FALSE,
+      lvad_disc = FALSE,
+      inotrope_high = FALSE,
+      inotrope_low = FALSE
+    ),
+  
+  JustFormHRStat3 %>%
+    transmute(
+      JustId,
+      ChangeDate,
+      status_form = "Adult Status 3",
+      ecmo = FALSE,
+      iabp = CriteriaIabpSupport == 1,
+      endovascular_mcsd = FALSE,
+      lvad = FALSE,
+      lvad_disc = CriteriaLvadDiscSupport == 1,            # LVAD discretionary (Status 3)
+      inotrope_high = CriteriaInotropeSupport == 1,        # high-dose inotropes (Status 3 file)
+      inotrope_low = FALSE
+    ),
+  
+  JustFormHRStat4 %>%
+    transmute(
+      JustId,
+      ChangeDate,
+      status_form = "Adult Status 4",
+      ecmo = FALSE,
+      iabp = FALSE,
+      endovascular_mcsd = FALSE,
+      lvad = CriteriaLvadSupport == 1,
+      lvad_disc = FALSE,
+      inotrope_high = FALSE,
+      inotrope_low = CriteriaInotropeSupport == 1          # low-dose inotropes (Status 4 file)
+    )
+) %>%
+  filter(
+    !is.na(ChangeDate),
+    ChangeDate <= snapshot_end
+  ) %>%
+  left_join(
+    justid_px_lookup_clean,
+    by = "JustId"
+  ) %>%
+  left_join(
+    justform_core,
+    by = "JustId"
+  ) %>%
+  mutate(
+    PX_ID = as.character(PX_ID)
+  )
+
+```
+
+##Prepare stathist_thor and get a total monthly candidate count across all 6 statuses
+```{r}
+## stathist_thor monthly active denominator
+
+#heart-only status history rows, expanded to active first-of-month snapshots
+stathist_filtered <- StatHist_Thor %>%
+  mutate(
+    PX_ID = as.character(PX_ID)
+  ) %>%
+  filter(WL_ORG == "HR") %>%
+  add_active_month_snapshots()
+
+#keep adult statuses 1-6 and label them
+stathist_monthly <- stathist_filtered %>%
+  filter(CANHX_STAT_CD %in% c(
+    "2110", "2120", "2130", "2140", "2150", "2160"
+  )) %>%
+  mutate(
+    CANHX_STAT_label = recode(
+      CANHX_STAT_CD,
+      "2110" = "Adult Status 1",
+      "2120" = "Adult Status 2",
+      "2130" = "Adult Status 3",
+      "2140" = "Adult Status 4",
+      "2150" = "Adult Status 5",
+      "2160" = "Adult Status 6"
+    )
+  )
+
+#gets patient/status/month frame from stathist
+active_status_patient_months <- stathist_monthly %>%
+  filter(!is.na(PX_ID)) %>%
+  distinct(
+    PX_ID,
+    MonthSnapshot,
+    status_form = CANHX_STAT_label
+  )
+
+#for each active patient/status/month, take the most recent JustForm
+justform_patient_month <- active_status_patient_months %>%
+  inner_join(
+    justform_status_long %>%
+      filter(
+        !is.na(PX_ID),
+        !is.na(ChangeDate)
+      ) %>%
+      select(
+        PX_ID,
+        JustId,
+        ChangeDate,
+        status_form,
+        RequestedCandStat_descrip,
+        ecmo,
+        iabp,
+        endovascular_mcsd,
+        lvad,
+        lvad_disc,
+        inotrope_high,
+        inotrope_low,
+        exception
+      ),
+    by = c("PX_ID", "status_form"),
+    relationship = "many-to-many"
+  ) %>%
+  filter(
+    ChangeDate <= MonthSnapshot
+  ) %>%
+  group_by(PX_ID, MonthSnapshot, status_form) %>%
+  arrange(
+    desc(ChangeDate),
+    desc(suppressWarnings(as.numeric(JustId))),
+    .by_group = TRUE
+  ) %>%
+  slice(1) %>%
+  ungroup()
+
+#check that there is only one JustForm row per patient/status/month.
+justform_patient_month %>%
+  count(PX_ID, MonthSnapshot, status_form) %>%
+  filter(n > 1)
+```
+
+
+## Total monthly denominator (total candidates listed per month (stat 1-6))
+
+```{r total-denominator}
+#Total monthly denominator: unique active Status 1-6 heart candidates
+all_patient_monthly_counts <- stathist_monthly %>%
+  filter(!is.na(PX_ID)) %>%
+  group_by(MonthSnapshot) %>%
+  summarise(
+    n_all = n_distinct(PX_ID),
+    .groups = "drop"
+  )
+```
+
+## Monthly numerators and proportions (how much of each device)
+
+```{r monthly-numerators}
+#how many (individuals, month) have criterion of interest (adds new label, keeps status value as well)
+summarise_patient_criterion <- function(status_value, flag_col, support_label) {
+  justform_patient_month %>%
+    group_by(MonthSnapshot) %>%
+    summarise(
+      support_type = support_label,
+      n_yes = sum(
+        status_form == status_value & .data[[flag_col]],
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    )
+}
+
+#use function to generate all numerators desired + label
+criteria_numerators <- bind_rows(
+  summarise_patient_criterion("Adult Status 1", "ecmo", "Status 1: ECMO"),
+  summarise_patient_criterion("Adult Status 2", "iabp", "Status 2: IABP"),
+  summarise_patient_criterion("Adult Status 2", "endovascular_mcsd", "Status 2: Endovascular MCSD"),
+  summarise_patient_criterion("Adult Status 3", "iabp", "Status 3: IABP"),
+  summarise_patient_criterion("Adult Status 4", "lvad", "Status 4: LVAD")
+)
+
+support_levels <- c(
+  "Status 1: ECMO",
+  "Status 2: IABP",
+  "Status 2: Endovascular MCSD",
+  "Status 3: IABP",
+  "Status 4: LVAD"
+)
+
+#generate numerators for each criteria
+criteria_month_props <- criteria_numerators %>%
+  group_by(MonthSnapshot, support_type) %>%
+  summarise(
+    n_yes = sum(n_yes),
+    .groups = "drop"
+  ) %>%
+  complete(
+    MonthSnapshot = all_patient_monthly_counts$MonthSnapshot,
+    support_type = support_levels,
+    fill = list(n_yes = 0)
+  ) %>%
+  left_join(all_patient_monthly_counts, by = "MonthSnapshot") %>%
+  mutate(
+    proportion = n_yes / n_all
+  )
+```
+
+## Overall support-type proportions
+
+```{r overall-support-proportions}
+overall_support_month_props <- criteria_numerators %>%
+  mutate(
+    support_type = case_when(
+      support_type == "Status 1: ECMO" ~ "ECMO",
+      support_type %in% c("Status 2: IABP", "Status 3: IABP") ~ "IABP",
+      support_type == "Status 2: Endovascular MCSD" ~ "Endovascular MCSD",
+      support_type == "Status 4: LVAD" ~ "LVAD",
+      TRUE ~ support_type
+    )
+  ) %>%
+  group_by(MonthSnapshot, support_type) %>%
+  summarise(
+    n_yes = sum(n_yes),
+    .groups = "drop"
+  ) %>%
+  complete(
+    MonthSnapshot = all_patient_monthly_counts$MonthSnapshot,
+    support_type = c("ECMO", "IABP", "Endovascular MCSD", "LVAD"),
+    fill = list(n_yes = 0)
+  ) %>%
+  left_join(all_patient_monthly_counts, by = "MonthSnapshot") %>%
+  mutate(
+    proportion = n_yes / n_all
+  )
+```
+
+```{r overall-support-plot}
+ggplot(
+  overall_support_month_props,
+  aes(x = MonthSnapshot, y = proportion, color = support_type)
+) +
+  geom_line() +
+  geom_point(size = 1) +
+  geom_vline(xintercept = policy_date, linetype = "dashed") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%m/%Y") +
+  scale_y_continuous(
+    limits = c(0, 0.50),
+    breaks = seq(0, 0.50, 0.05),
+    labels = scales::percent_format()
+  ) +
+  labs(
+    title = "Monthly Proportion of Active Heart Candidates by Support Type",
+    x = "Month Snapshot",
+    y = "Proportion of Active Status 1–6 Candidates",
+    color = "Support Type"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## Same graphs w/o lvad on there
+
+```{r}
+ggplot(
+  overall_support_month_props %>%
+    filter(support_type != "LVAD"),
+  aes(x = MonthSnapshot, y = proportion, color = support_type)
+) +
+  geom_line() +
+  geom_point(size = 1) +
+  geom_vline(xintercept = policy_date, linetype = "dashed") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%m/%Y") +
+  scale_y_continuous(
+    limits = c(0, 0.10),
+    breaks = seq(0, 0.10, 0.01),
+    labels = scales::percent_format()
+  ) +
+  labs(
+    title = "Monthly Proportion of Active Heart Candidates by Support Type",
+    subtitle = "LVAD excluded",
+    x = "Month Snapshot",
+    y = "Proportion of Active Status 1–6 Candidates",
+    color = "Support Type"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+
+## Within-status numerator helper
+
+```{r within-status-helper}
+# Reusable within-status builders. Pattern used by ALL of Status 1-4 below:
+#   numerator   = active-in-status patient-months whose governing JustForm has the criterion of interest
+#   denominator = active-in-status patient-months from stathist
+# Every status section uses the same three helpers and the same plot styling, so the
+# graphs are directly comparable.
+#
+# Returns (for each helper): MonthSnapshot, support_type, n_yes, n_status, proportion.
+
+# denominator for any status, from stathist
+status_monthly_denominator <- function(status_label) {
+  stathist_monthly %>%
+    filter(CANHX_STAT_label == status_label, !is.na(PX_ID)) %>%
+    distinct(PX_ID, MonthSnapshot) %>%
+    group_by(MonthSnapshot) %>%
+    summarise(n_status = n_distinct(PX_ID), .groups = "drop")
+}
+
+# one within-status criterion: distinct patients whose governing form has `flag_col`
+within_status_criterion <- function(criteria_rows, denom, flag_col, support_label) {
+  criteria_rows %>%
+    group_by(MonthSnapshot) %>%
+    summarise(
+      n_yes = n_distinct(PX_ID[.data[[flag_col]]]),
+      .groups = "drop"
+    ) %>%
+    complete(MonthSnapshot = denom$MonthSnapshot, fill = list(n_yes = 0)) %>%
+    mutate(support_type = support_label) %>%
+    left_join(denom, by = "MonthSnapshot") %>%
+    mutate(proportion = n_yes / n_status) %>%
+    select(MonthSnapshot, support_type, n_yes, n_status, proportion)
+}
+
+# within-status count over an arbitrary row-predicate (used for "Other" and for combined
+# device = IABP or impella). `predicate_fn` is a function of the data frame returning a
+# logical vector (e.g. function(d) d$iabp | d$endovascular_mcsd); distinct patients
+# satisfying it are counted. Using a plain function avoids any tidy-eval/rlang fragility.
+within_status_union <- function(criteria_rows, denom, predicate_fn, support_label) {
+  df <- criteria_rows
+  df$.match <- predicate_fn(df)        # logical vector over all rows, computed up front
+  df %>%
+    group_by(MonthSnapshot) %>%
+    summarise(
+      n_yes = n_distinct(PX_ID[.match]),
+      .groups = "drop"
+    ) %>%
+    complete(MonthSnapshot = denom$MonthSnapshot, fill = list(n_yes = 0)) %>%
+    mutate(support_type = support_label) %>%
+    left_join(denom, by = "MonthSnapshot") %>%
+    mutate(proportion = n_yes / n_status) %>%
+    select(MonthSnapshot, support_type, n_yes, n_status, proportion)
+}
+
+# shared plot styling so every within-status graph matches
+within_status_plot <- function(df, plot_title, y_label = "Proportion of Active Candidates",
+                                y_max = 0.8, y_step = 0.08) {
+  ggplot(df, aes(x = MonthSnapshot, y = proportion, color = support_type)) +
+    geom_line() +
+    geom_point(size = 1) +
+    geom_vline(xintercept = policy_date, linetype = "dashed") +
+    scale_x_date(date_breaks = "1 month", date_labels = "%m/%Y") +
+    scale_y_continuous(
+      limits = c(0, y_max),
+      breaks = seq(0, y_max, y_step),
+      labels = scales::percent_format()
+    ) +
+    labs(title = plot_title, x = "Month Snapshot", y = y_label, color = "Criterion") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+
+## Status 4: LVAD vs low-dose inotropes (within Status 4)
+
+```{r status4-criteria-proportions}
+status4_denom <- status_monthly_denominator("Adult Status 4")
+
+status4_criteria_rows <- justform_patient_month %>%
+  filter(status_form == "Adult Status 4")
+
+status4_props <- bind_rows(
+  within_status_criterion(status4_criteria_rows, status4_denom, "lvad",         "Status 4: LVAD"),
+  within_status_criterion(status4_criteria_rows, status4_denom, "inotrope_low", "Status 4: Low-dose inotropes")
+)
+
+status4_props
+```
+
+```{r status4-criteria-plot}
+within_status_plot(
+  status4_props,
+  "Monthly Proportion of Status 4 Candidates by Criterion",
+  y_label = "Proportion of Active Status 4 Candidates"
+)
+```
+
+
+## Status 3: LVAD discretionary vs high-dose inotropes (within Status 3)
+
+LVAD complications criterion is deferred for now (to be added later).
+
+```{r status3-criteria-proportions}
+status3_denom <- status_monthly_denominator("Adult Status 3")
+
+status3_criteria_rows <- justform_patient_month %>%
+  filter(status_form == "Adult Status 3")
+
+status3_props <- bind_rows(
+  within_status_criterion(status3_criteria_rows, status3_denom, "lvad_disc",     "Status 3: LVAD discretionary"),
+  within_status_criterion(status3_criteria_rows, status3_denom, "inotrope_high", "Status 3: High-dose inotropes")
+  # TODO: add "Status 3: LVAD complications" once that criterion source is identified
+)
+
+status3_props
+```
+
+```{r status3-criteria-plot}
+within_status_plot(
+  status3_props,
+  "Monthly Proportion of Status 3 Candidates by Criterion",
+  y_label = "Proportion of Active Status 3 Candidates"
+)
+```
+
+
+## Status 2: IABP, impella, exceptions, and Other (within Status 2)
+
+```{r status2-overlap-check}
+status2_denom <- status_monthly_denominator("Adult Status 2")
+
+status2_criteria_rows <- justform_patient_month %>%
+  filter(status_form == "Adult Status 2")
+
+status2_overlap_check <- status2_criteria_rows %>%
+  summarise(
+    n_rows                 = n(),
+    n_iabp                 = sum(iabp, na.rm = TRUE),
+    n_impella_endovas      = sum(endovascular_mcsd, na.rm = TRUE),
+    n_exception            = sum(exception, na.rm = TRUE),
+    n_device               = sum((iabp | endovascular_mcsd), na.rm = TRUE),
+    n_device_and_exception = sum((iabp | endovascular_mcsd) & exception, na.rm = TRUE),
+    n_iabp_and_impella     = sum(iabp & endovascular_mcsd, na.rm = TRUE)
+  )
+
+status2_overlap_check
+```
+
+```{r status2-broken-out-proportions}
+# (A) IABP / impella / exception / other, broken out
+status2_props_brokenout <- bind_rows(
+  within_status_criterion(status2_criteria_rows, status2_denom, "iabp",              "Status 2: IABP"),
+  within_status_criterion(status2_criteria_rows, status2_denom, "endovascular_mcsd", "Status 2: Impella (Endovascular MCSD)"),
+  within_status_criterion(status2_criteria_rows, status2_denom, "exception",         "Status 2: Exception"),
+  within_status_union(status2_criteria_rows, status2_denom,
+                      function(d) !d$exception & !d$iabp & !d$endovascular_mcsd, "Status 2: Other")
+)
+
+status2_props_brokenout
+```
+
+```{r status2-broken-out-plot}
+within_status_plot(
+  status2_props_brokenout,
+  "Monthly Proportion of Status 2 Candidates by Criterion (broken out)",
+  y_label = "Proportion of Active Status 2 Candidates"
+)
+```
+
+```{r status2-combined-proportions}
+# (B) combined device (IABP or impella) / exception / other
+status2_props_combined <- bind_rows(
+  within_status_union(status2_criteria_rows, status2_denom,
+                      function(d) d$iabp | d$endovascular_mcsd, "Status 2: IABP or Impella"),
+  within_status_criterion(status2_criteria_rows, status2_denom, "exception", "Status 2: Exception"),
+  within_status_union(status2_criteria_rows, status2_denom,
+                      function(d) !d$exception & !d$iabp & !d$endovascular_mcsd, "Status 2: Other")
+)
+
+status2_props_combined
+```
+
+```{r status2-combined-plot}
+within_status_plot(
+  status2_props_combined,
+  "Monthly Proportion of Status 2 Candidates: Device vs Exception vs Other",
+  y_label = "Proportion of Active Status 2 Candidates"
+)
+```
+
+
+## Status 1: ECMO, exceptions, and Other (within Status 1)
+
+"Other" = active Status 1 patients whose governing form is neither ECMO nor exception.
+
+```{r status1-overlap-check}
+status1_denom <- status_monthly_denominator("Adult Status 1")
+
+status1_criteria_rows <- justform_patient_month %>%
+  filter(status_form == "Adult Status 1")
+
+status1_overlap_check <- status1_criteria_rows %>%
+  summarise(
+    n_rows               = n(),
+    n_ecmo               = sum(ecmo, na.rm = TRUE),
+    n_exception          = sum(exception, na.rm = TRUE),
+    n_ecmo_and_exception = sum(ecmo & exception, na.rm = TRUE),
+    n_ecmo_or_exception  = sum(ecmo | exception, na.rm = TRUE)
+  )
+
+status1_overlap_check
+```
+
+```{r status1-proportions}
+status1_props <- bind_rows(
+  within_status_criterion(status1_criteria_rows, status1_denom, "ecmo",      "Status 1: ECMO"),
+  within_status_criterion(status1_criteria_rows, status1_denom, "exception", "Status 1: Exception"),
+  within_status_union(status1_criteria_rows, status1_denom,
+                      function(d) !d$ecmo & !d$exception, "Status 1: Other")
+)
+
+status1_props
+```
+
+```{r status1-plot}
+within_status_plot(
+  status1_props,
+  "Monthly Proportion of Status 1 Candidates by Criterion",
+  y_label = "Proportion of Active Status 1 Candidates"
+)
+```
+
+```{r}
+
+# justform_patient_month is an INNER join of stathist active patient-months with the
+# justification forms, so it only contains patient-months that have a governing form
+# (ChangeDate <= MonthSnapshot) whose form-status matches the stathist status. The
+# within-status denominators count ALL active patients in that status from stathist,
+# including those with no governing form that month -- which is why IABP + impella +
+# exception + Other falls short of 1. This chunk quantifies and characterizes the gap.
+
+# most-recent form per (PX_ID, MonthSnapshot) across ANY status (not status-matched),
+# so we can tell "no same-status form" apart from "no form at all".
+most_recent_any_status_form <- active_status_patient_months %>%
+  distinct(PX_ID, MonthSnapshot) %>%
+  inner_join(
+    justform_status_long %>%
+      filter(!is.na(PX_ID), !is.na(ChangeDate)) %>%
+      select(PX_ID, JustId, ChangeDate, status_form),
+    by = "PX_ID",
+    relationship = "many-to-many"
+  ) %>%
+  filter(ChangeDate <= MonthSnapshot) %>%
+  group_by(PX_ID, MonthSnapshot) %>%
+  arrange(desc(ChangeDate), desc(suppressWarnings(as.numeric(JustId))), .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  transmute(PX_ID, MonthSnapshot, any_form_status = status_form)
+
+# per-status form coverage summary (pooled over all months in window)
+form_coverage_by_status <- lapply(
+  c("Adult Status 1", "Adult Status 2", "Adult Status 3",
+    "Adult Status 4", "Adult Status 5", "Adult Status 6"),
+  function(stat) {
+    active <- active_status_patient_months %>%
+      filter(status_form == stat) %>%
+      distinct(PX_ID, MonthSnapshot)
+
+    has_matched_form <- justform_patient_month %>%
+      filter(status_form == stat) %>%
+      distinct(PX_ID, MonthSnapshot) %>%
+      mutate(has_matched_form = TRUE)
+
+    active %>%
+      left_join(has_matched_form, by = c("PX_ID", "MonthSnapshot")) %>%
+      mutate(has_matched_form = !is.na(has_matched_form)) %>%
+      left_join(most_recent_any_status_form, by = c("PX_ID", "MonthSnapshot")) %>%
+      summarise(
+        status_form          = stat,
+        n_active             = n(),
+        n_matched_form       = sum(has_matched_form),
+        n_no_matched_form    = sum(!has_matched_form),
+        n_form_other_status  = sum(!has_matched_form & !is.na(any_form_status)),
+        n_no_form_at_all     = sum(!has_matched_form & is.na(any_form_status)),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        pct_matched = round(100 * n_matched_form / n_active, 1),
+        pct_no_form = round(100 * n_no_matched_form / n_active, 1)
+      )
+  }
+) %>% bind_rows()
+
+form_coverage_by_status
+
+# Status 2 broken out by month so you can see if the gap is steady or concentrated
+# (e.g. at the left edge of the window).
+cat("\n=== STATUS 2 FORM COVERAGE BY MONTH ===\n")
+status2_coverage_by_month <- active_status_patient_months %>%
+  filter(status_form == "Adult Status 2") %>%
+  distinct(PX_ID, MonthSnapshot) %>%
+  left_join(
+    justform_patient_month %>%
+      filter(status_form == "Adult Status 2") %>%
+      distinct(PX_ID, MonthSnapshot) %>%
+      mutate(has_matched_form = TRUE),
+    by = c("PX_ID", "MonthSnapshot")
+  ) %>%
+  mutate(has_matched_form = !is.na(has_matched_form)) %>%
+  group_by(MonthSnapshot) %>%
+  summarise(
+    n_active       = n(),
+    n_matched_form = sum(has_matched_form),
+    n_no_form      = sum(!has_matched_form),
+    pct_no_form    = round(100 * sum(!has_matched_form) / n(), 1),
+    .groups = "drop"
+  )
+
+status2_coverage_by_month
+```
+
+```{r}
+# All active patient-months (stathist truth)
+active_pm <- active_status_patient_months %>%
+  distinct(PX_ID, MonthSnapshot, status_form)
+
+# Matched ones (survived the inner join + ChangeDate<=MonthSnapshot)
+matched_pm <- justform_patient_month %>%
+  distinct(PX_ID, MonthSnapshot, status_form) %>%
+  mutate(matched = TRUE)
+
+# Every form for a patient, with its filed status and date (no status/date filter yet)
+all_forms <- justform_status_long %>%
+  filter(!is.na(PX_ID), !is.na(ChangeDate)) %>%
+  select(PX_ID, JustId, ChangeDate, form_status = status_form)
+
+unmatched <- active_pm %>%
+  left_join(matched_pm, by = c("PX_ID", "MonthSnapshot", "status_form")) %>%
+  filter(is.na(matched)) %>%
+  select(PX_ID, MonthSnapshot, listed_status = status_form)
+
+# For each unmatched (PX_ID, month, listed_status), characterize WHY:
+mismatch_anatomy <- unmatched %>%
+  left_join(all_forms, by = "PX_ID", relationship = "many-to-many") %>%
+  group_by(PX_ID, MonthSnapshot, listed_status) %>%
+  summarise(
+    has_any_form_ever              = any(!is.na(JustId)),
+    has_any_form_by_month          = any(ChangeDate <= MonthSnapshot),
+    has_same_status_form_ever      = any(form_status == listed_status),
+    has_same_status_form_by_month  = any(form_status == listed_status & ChangeDate <= MonthSnapshot),
+    # most recent form AS OF the month, regardless of status
+    recent_form_status_by_month    = form_status[ChangeDate <= MonthSnapshot][which.max(ChangeDate[ChangeDate <= MonthSnapshot])][1],
+    .groups = "drop"
+  ) %>%
+  mutate(
+    reason = case_when(
+      !has_any_form_ever                              ~ "1. no form in any StatN file at all",
+      !has_any_form_by_month                          ~ "3b. only has form(s) dated AFTER this month",
+      has_same_status_form_by_month                   ~ "?? same-status form exists by month (should have matched - investigate)",
+      !has_same_status_form_ever                      ~ "2. has form(s) but NEVER in the listed status",
+      TRUE                                            ~ "3a. has same-status form, but only dated after month; most recent by-month is another status"
+    )
+  )
+
+cat("\n=== WHY UNMATCHED (counts by reason) ===\n")
+mismatch_anatomy %>% count(reason, sort = TRUE) %>% print()
+
+cat("\n=== for status mismatches: listed status vs the most-recent by-month form status ===\n")
+mismatch_anatomy %>%
+  filter(grepl("^2|^3a", reason)) %>%
+  count(listed_status, recent_form_status_by_month, sort = TRUE) %>%
+  print(n = 40)
+
+cat("\n=== sample of the worst category for manual inspection ===\n")
+mismatch_anatomy %>% filter(grepl("investigate", reason)) %>% head(20) %>% print()
+```
+
+```{r}
+# 1. How many raw justification forms FAIL to resolve to a PX_ID?
+#    (justform_status_long before the !is.na(PX_ID) filter.)
+raw_forms_linked <- bind_rows(
+  JustFormHRStat1 %>% transmute(JustId, status_form = "Adult Status 1"),
+  JustFormHRStat2 %>% transmute(JustId, status_form = "Adult Status 2"),
+  JustFormHRStat3 %>% transmute(JustId, status_form = "Adult Status 3"),
+  JustFormHRStat4 %>% transmute(JustId, status_form = "Adult Status 4")
+) %>%
+  mutate(JustId = as.character(JustId)) %>%
+  left_join(justid_px_lookup_clean, by = "JustId")
+
+cat("\n=== RAW STATN FORM LINKAGE ===\n")
+raw_forms_linked %>%
+  summarise(
+    n_forms              = n(),
+    n_forms_with_PX_ID   = sum(!is.na(PX_ID)),
+    n_forms_missing_PX_ID = sum(is.na(PX_ID)),
+    pct_missing          = round(100 * mean(is.na(PX_ID)), 2)
+  ) %>% print()
+
+# 2. Are the JustIds that fail to link actually present in the DataLink table at all?
+#    distinguishes "JustId absent from DataLink" vs "DataLink row maps to NA px_id"
+cat("\n=== WHERE DOES THE LINK BREAK? ===\n")
+unlinked_justids <- raw_forms_linked %>% filter(is.na(PX_ID)) %>% distinct(JustId)
+unlinked_justids %>%
+  left_join(
+    JustFormHRDataLink %>% mutate(JustId = as.character(JustId)) %>%
+      distinct(JustId, WlregAuditId = as.character(WlregAuditId)),
+    by = "JustId"
+  ) %>%
+  summarise(
+    n_unlinked_justids        = n(),
+    n_absent_from_datalink    = sum(is.na(WlregAuditId)),       # JustId not in DataLink at all
+    n_in_datalink_but_no_pxid = sum(!is.na(WlregAuditId))       # in DataLink, but WlregAuditId->px_id failed
+  ) %>% print()
+
+# 3. Reconcile to bucket 1: do bucket-1 PX_IDs gain a form if we DON'T require linkage?
+#    We can only attach unlinked forms to a PX_ID through WlregAuditId->stathist if that
+#    path exists; if not, these forms are simply unattributable.
+cat("\nNote: if n_forms_missing_PX_ID is ~0, bucket 1 is genuinely form-less (no fix).\n")
+cat("If it is large, we are dropping real forms at the JustId->PX_ID bridge (fixable).\n")
+```
+```{r}
+# Bucket 1 ("no form in any StatN file") only means a PX_ID has no form that LINKED to it.
+# That could be (a) the patient genuinely never had a justification form, or (b) a form
+# exists in the raw StatN file but its JustId failed to resolve to a PX_ID through the chain
+# JustId -> JustFormHRDataLink -> WlregAuditId -> RiskStratDataHR -> px_id, so we dropped it
+# with !is.na(PX_ID). This chunk measures how many raw forms fail to link, and WHERE.
+
+# 1. Of all RAW StatN forms, how many resolve to a PX_ID vs not?
+raw_forms_linked <- bind_rows(
+  JustFormHRStat1 %>% transmute(JustId, status_form = "Adult Status 1"),
+  JustFormHRStat2 %>% transmute(JustId, status_form = "Adult Status 2"),
+  JustFormHRStat3 %>% transmute(JustId, status_form = "Adult Status 3"),
+  JustFormHRStat4 %>% transmute(JustId, status_form = "Adult Status 4")
+) %>%
+  mutate(JustId = as.character(JustId)) %>%
+  left_join(justid_px_lookup_clean, by = "JustId")
+
+cat("\n=== RAW STATN FORM LINKAGE ===\n")
+raw_forms_linked %>%
+  summarise(
+    n_forms               = n(),
+    n_forms_with_PX_ID    = sum(!is.na(PX_ID)),
+    n_forms_missing_PX_ID = sum(is.na(PX_ID)),
+    pct_missing           = round(100 * mean(is.na(PX_ID)), 2)
+  ) %>% print()
+
+# 2. For forms that fail to link: JustId absent from DataLink, or present but
+#    WlregAuditId -> px_id yields NA, or actually resolvable (=> our lookup has a bug).
+cat("\n=== WHERE DOES THE LINK BREAK? ===\n")
+datalink_min <- JustFormHRDataLink %>%
+  mutate(JustId = as.character(JustId), WlregAuditId = as.character(WlregAuditId)) %>%
+  distinct(JustId, WlregAuditId)
+
+riskstrat_min <- RiskStratDataHR %>%
+  mutate(WlregAuditId = as.character(WlregAuditId)) %>%
+  distinct(WlregAuditId, px_id)
+
+raw_forms_linked %>%
+  filter(is.na(PX_ID)) %>%
+  distinct(JustId) %>%
+  left_join(datalink_min, by = "JustId") %>%
+  left_join(riskstrat_min, by = "WlregAuditId") %>%
+  summarise(
+    n_unlinked_justids          = n(),
+    n_absent_from_datalink      = sum(is.na(WlregAuditId)),
+    n_in_datalink_no_wlreg_pxid = sum(!is.na(WlregAuditId) & is.na(px_id)),
+    n_should_have_linked        = sum(!is.na(WlregAuditId) & !is.na(px_id))
+  ) %>% print()
+
+cat("\nINTERPRETATION:\n")
+cat(" - n_forms_missing_PX_ID ~ 0  => bucket 1 is genuinely form-less; nothing missed.\n")
+cat(" - large + n_absent_from_datalink large => JustId never in DataLink (upstream extract gap).\n")
+cat(" - large + n_in_datalink_no_wlreg_pxid large => WlregAuditId -> px_id is the leak.\n")
+cat(" - n_should_have_linked > 0 => justid_px_lookup_clean is dropping resolvable forms (bug).\n")
+```
+
+```{r}
+# Rebuild the active patient-months and the matched set, then isolate bucket 1.
+active_pm <- active_status_patient_months %>%
+  distinct(PX_ID, MonthSnapshot, status_form)
+
+matched_pm <- justform_patient_month %>%
+  distinct(PX_ID, MonthSnapshot, status_form) %>%
+  mutate(matched = TRUE)
+
+# every linked StatN form for a patient (any status, any date)
+all_linked_forms <- justform_status_long %>%
+  filter(!is.na(PX_ID), !is.na(ChangeDate)) %>%
+  select(PX_ID, JustId, ChangeDate, form_status = status_form)
+
+# bucket 1 = active patient-month, no linked StatN form of ANY status for that PX_ID at all
+bucket1 <- active_pm %>%
+  left_join(matched_pm, by = c("PX_ID", "MonthSnapshot", "status_form")) %>%
+  filter(is.na(matched)) %>%
+  anti_join(all_linked_forms %>% distinct(PX_ID), by = "PX_ID") %>%   # truly zero StatN forms
+  select(PX_ID, MonthSnapshot, listed_status = status_form)
+
+cat("bucket-1 patient-months:", nrow(bucket1),
+    " | distinct patients:", n_distinct(bucket1$PX_ID), "\n")
+
+# distinct patient list (this is what you check by hand)
+bucket1_patients <- bucket1 %>%
+  distinct(PX_ID, listed_status) %>%
+  arrange(PX_ID)
+
+# For each bucket-1 patient, does a JustId exist for them ANYWHERE upstream?
+#  - in JustFormHR (parent form table), via the JustId->PX_ID lookup
+#  - in any raw StatN file, via that same lookup
+justids_for_pxid <- justid_px_lookup_clean %>%
+  semi_join(bucket1_patients, by = "PX_ID")
+
+# JustIds that actually appear in the parent JustFormHR
+justformhr_ids <- JustFormHR %>% mutate(JustId = as.character(JustId)) %>% distinct(JustId)
+# JustIds that appear in any raw StatN file
+statn_ids <- bind_rows(
+  JustFormHRStat1 %>% transmute(JustId),
+  JustFormHRStat2 %>% transmute(JustId),
+  JustFormHRStat3 %>% transmute(JustId),
+  JustFormHRStat4 %>% transmute(JustId)
+) %>% mutate(JustId = as.character(JustId)) %>% distinct(JustId)
+
+bucket1_audit <- bucket1_patients %>%
+  left_join(
+    justids_for_pxid %>%
+      mutate(
+        in_justformhr = JustId %in% justformhr_ids$JustId,
+        in_any_statn  = JustId %in% statn_ids$JustId
+      ) %>%
+      group_by(PX_ID) %>%
+      summarise(
+        n_justids_linked   = n(),
+        n_in_justformhr    = sum(in_justformhr),
+        n_in_any_statn     = sum(in_any_statn),
+        .groups = "drop"
+      ),
+    by = "PX_ID"
+  ) %>%
+  mutate(across(c(n_justids_linked, n_in_justformhr, n_in_any_statn),
+                ~ tidyr::replace_na(., 0L)))
+
+cat("\n=== BUCKET-1 PATIENT AUDIT (per patient) ===\n")
+cat("n_justids_linked = how many JustIds map to this PX_ID via justid_px_lookup_clean\n")
+cat("n_in_justformhr  = how many of those appear in the parent JustFormHR table\n")
+cat("n_in_any_statn   = how many appear in any raw StatN criteria file\n\n")
+
+# summary: how many bucket-1 patients have ZERO justids at all vs some
+bucket1_audit %>%
+  summarise(
+    n_patients                  = n(),
+    n_with_zero_justids         = sum(n_justids_linked == 0),
+    n_with_justid_but_no_statn  = sum(n_justids_linked > 0 & n_in_any_statn == 0),
+    n_with_statn_form           = sum(n_in_any_statn > 0)   # should be 0 by construction
+  ) %>% print()
+
+# the actual inspectable table
+print(head(bucket1_audit, 50))
+
+# write the full list to CSV so you can open it and spot-check against the SAS files
+write.csv(bucket1_audit, "bucket1_patients_audit.csv", row.names = FALSE)
+cat("\nFull list written to bucket1_patients_audit.csv\n")
+```
+
+```{r}
+active_pm <- active_status_patient_months %>%
+  distinct(PX_ID, MonthSnapshot, status_form)
+
+matched_pm <- justform_patient_month %>%
+  distinct(PX_ID, MonthSnapshot, status_form) %>%
+  mutate(matched = TRUE)
+
+# unmatched active patient-months, labeled by listed status
+unmatched_by_status <- active_pm %>%
+  left_join(matched_pm, by = c("PX_ID", "MonthSnapshot", "status_form")) %>%
+  filter(is.na(matched)) %>%
+  count(listed_status = status_form, name = "n_unmatched_pm") %>%
+  left_join(
+    active_pm %>% count(listed_status = status_form, name = "n_active_pm"),
+    by = "listed_status"
+  ) %>%
+  mutate(pct_unmatched = round(100 * n_unmatched_pm / n_active_pm, 1)) %>%
+  arrange(listed_status)
+
+cat("\n=== UNMATCHED PATIENT-MONTHS BY LISTED STATUS ===\n")
+print(unmatched_by_status)
+
+cat("\nOnly the 'Adult Status 1/2/3/4' rows matter for your within-status bars.\n")
+cat("Status 5/6 unmatched is expected and irrelevant (not in any within-status denominator).\n")
+```
+
+```{r}
+# Unmatched active patient-months, restricted to Status 1-4 (the only ones in your bars).
+active_pm_14 <- active_status_patient_months %>%
+  filter(status_form %in% c("Adult Status 1","Adult Status 2","Adult Status 3","Adult Status 4")) %>%
+  distinct(PX_ID, MonthSnapshot, status_form)
+
+matched_pm <- justform_patient_month %>%
+  distinct(PX_ID, MonthSnapshot, status_form) %>%
+  mutate(matched = TRUE)
+
+unmatched_14 <- active_pm_14 %>%
+  left_join(matched_pm, by = c("PX_ID","MonthSnapshot","status_form")) %>%
+  filter(is.na(matched)) %>%
+  select(PX_ID, MonthSnapshot, listed_status = status_form)
+
+# every linked StatN form for these patients (any status, any date)
+all_forms <- justform_status_long %>%
+  filter(!is.na(PX_ID), !is.na(ChangeDate)) %>%
+  select(PX_ID, JustId, ChangeDate, form_status = status_form)
+
+unmatched_14_anatomy <- unmatched_14 %>%
+  left_join(all_forms, by = "PX_ID", relationship = "many-to-many") %>%
+  group_by(PX_ID, MonthSnapshot, listed_status) %>%
+  summarise(
+    has_any_form_ever             = any(!is.na(JustId)),
+    has_any_form_by_month         = any(ChangeDate <= MonthSnapshot),
+    has_same_status_form_ever     = any(form_status == listed_status),
+    has_same_status_form_by_month = any(form_status == listed_status & ChangeDate <= MonthSnapshot),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    bucket = case_when(
+      !has_any_form_ever                      ~ "1. no form ever (form-less)",
+      has_same_status_form_by_month           ~ "0. same-status form by month (should have matched - BUG)",
+      !has_any_form_by_month                  ~ "4. timing: only forms dated AFTER this month",
+      has_same_status_form_ever               ~ "3a. timing: same-status form exists but dated AFTER this month",
+      TRUE                                    ~ "2. form-less: has forms but never in listed status"
+    ),
+    kind = case_when(
+      grepl("^0", bucket) ~ "BUG",
+      grepl("^1|^2", bucket) ~ "form-less (structural)",
+      grepl("^3a|^4", bucket) ~ "timing"
+    )
+  )
+
+cat("\n=== UNMATCHED STATUS 1-4: bucket breakdown ===\n")
+unmatched_14_anatomy %>% count(listed_status, bucket) %>%
+  arrange(listed_status, bucket) %>% print(n = 100)
+
+cat("\n=== UNMATCHED STATUS 1-4: timing vs form-less, by status ===\n")
+unmatched_14_anatomy %>%
+  count(listed_status, kind) %>%
+  tidyr::pivot_wider(names_from = kind, values_from = n, values_fill = 0) %>%
+  print()
+
+# Is the timing component concentrated at the window's left edge? Show unmatched-by-month,
+# split timing vs form-less, for Status 1-4 pooled.
+cat("\n=== UNMATCHED STATUS 1-4 BY MONTH (timing vs form-less) ===\n")
+unmatched_14_anatomy %>%
+  count(MonthSnapshot, kind) %>%
+  tidyr::pivot_wider(names_from = kind, values_from = n, values_fill = 0) %>%
+  arrange(MonthSnapshot) %>%
+  print(n = 100)
+```
+
+```{r}
+# SELF-CONTAINED TEST. Does NOT modify the pipeline. It rebuilds active Status 1-4
+# patient-months WITH their stathist episode dates, then compares three rules for
+# matching a justification form to a (patient, month):
+#
+#   Rule A (current): form ChangeDate <= MonthSnapshot (first-of-month)
+#   Rule B (within-month): form ChangeDate <= end of MonthSnapshot's calendar month
+#   Rule C (within-episode): form ChangeDate <= the END of the stathist status episode
+#                            that covers this MonthSnapshot
+#
+# For each rule we report how many active Status 1-4 patient-months remain UNMATCHED,
+# split into timing (a same-status form exists for the patient, just later) vs
+# form-less (no same-status form ever). Rule that collapses 'timing' to ~0 is the fix.
+
+library(lubridate)
+
+# active Status 1-4 patient-months, but KEEP episode begin/end so Rule C is possible
+active_pm_dates <- stathist_monthly %>%
+  filter(CANHX_STAT_label %in% c("Adult Status 1","Adult Status 2","Adult Status 3","Adult Status 4"),
+         !is.na(PX_ID)) %>%
+  transmute(
+    PX_ID,
+    MonthSnapshot,
+    status_form = CANHX_STAT_label,
+    episode_begin = CANHX_BEGIN_DT,
+    episode_end   = CANHX_END_DT_adjusted
+  ) %>%
+  # one row per (PX_ID, month, status): keep the episode that covers this month
+  group_by(PX_ID, MonthSnapshot, status_form) %>%
+  arrange(desc(episode_begin), .by_group = TRUE) %>%
+  slice(1) %>%
+  ungroup()
+
+# same-status forms for these patients
+forms <- justform_status_long %>%
+  filter(!is.na(PX_ID), !is.na(ChangeDate)) %>%
+  select(PX_ID, JustId, ChangeDate, status_form)
+
+# join all same-status forms to each patient-month, then test each rule
+joined <- active_pm_dates %>%
+  left_join(forms, by = c("PX_ID","status_form"), relationship = "many-to-many") %>%
+  mutate(
+    month_end = ceiling_date(MonthSnapshot, "month") - days(1),
+    ruleA = !is.na(ChangeDate) & ChangeDate <= MonthSnapshot,
+    ruleB = !is.na(ChangeDate) & ChangeDate <= month_end,
+    ruleC = !is.na(ChangeDate) & ChangeDate <= episode_end
+  )
+
+# per (patient, month): did ANY same-status form satisfy each rule?
+pm_match <- joined %>%
+  group_by(PX_ID, MonthSnapshot, status_form) %>%
+  summarise(
+    has_same_status_form_ever = any(!is.na(ChangeDate)),
+    matched_A = any(ruleA),
+    matched_B = any(ruleB),
+    matched_C = any(ruleC),
+    .groups = "drop"
+  )
+
+summarise_rule <- function(df, matched_col, rule_name) {
+  df %>%
+    summarise(
+      rule              = rule_name,
+      n_pm              = n(),
+      n_matched         = sum(.data[[matched_col]]),
+      n_unmatched       = sum(!.data[[matched_col]]),
+      # of the unmatched, how many are timing (form exists, just not by the rule's cutoff)
+      n_unmatched_timing   = sum(!.data[[matched_col]] & has_same_status_form_ever),
+      # vs form-less (no same-status form at all)
+      n_unmatched_formless = sum(!.data[[matched_col]] & !has_same_status_form_ever)
+    )
+}
+
+cat("\n=== MATCH-RULE COMPARISON (active Status 1-4 patient-months) ===\n")
+bind_rows(
+  summarise_rule(pm_match, "matched_A", "A: <= first-of-month (current)"),
+  summarise_rule(pm_match, "matched_B", "B: <= end of that month"),
+  summarise_rule(pm_match, "matched_C", "C: <= end of stathist episode")
+) %>% print()
+
+# also by status, for rule C (the most permissive), to confirm it clears timing everywhere
+cat("\n=== RULE C UNMATCHED, BY STATUS ===\n")
+pm_match %>%
+  group_by(status_form) %>%
+  summarise(
+    n_pm                 = n(),
+    n_unmatched_timing   = sum(!matched_C & has_same_status_form_ever),
+    n_unmatched_formless = sum(!matched_C & !has_same_status_form_ever),
+    .groups = "drop"
+  ) %>% print()
+```
+
+```{r}
+library(lubridate)
+
+active_pm_dates <- stathist_monthly %>%
+  filter(CANHX_STAT_label %in% c("Adult Status 1","Adult Status 2","Adult Status 3","Adult Status 4"),
+         !is.na(PX_ID)) %>%
+  transmute(PX_ID, MonthSnapshot, status_form = CANHX_STAT_label,
+            episode_begin = CANHX_BEGIN_DT, episode_end = CANHX_END_DT_adjusted) %>%
+  group_by(PX_ID, MonthSnapshot, status_form) %>%
+  arrange(desc(episode_begin), .by_group = TRUE) %>% slice(1) %>% ungroup()
+
+forms <- justform_status_long %>%
+  filter(!is.na(PX_ID), !is.na(ChangeDate)) %>%
+  select(PX_ID, JustId, ChangeDate, status_form)
+
+# For each patient-month, look at ALL same-status forms and find where they sit
+# relative to this month and this episode.
+resid <- active_pm_dates %>%
+  left_join(forms, by = c("PX_ID","status_form"), relationship = "many-to-many") %>%
+  group_by(PX_ID, MonthSnapshot, status_form, episode_begin, episode_end) %>%
+  summarise(
+    has_form_ever          = any(!is.na(ChangeDate)),
+    matched_C              = any(!is.na(ChangeDate) & ChangeDate <= episode_end),
+    # nearest same-status form date, and where it falls
+    earliest_form          = suppressWarnings(min(ChangeDate, na.rm = TRUE)),
+    latest_form            = suppressWarnings(max(ChangeDate, na.rm = TRUE)),
+    any_form_after_episode = any(ChangeDate > episode_end, na.rm = TRUE),
+    any_form_before_begin  = any(ChangeDate < episode_begin, na.rm = TRUE),
+    any_form_within_episode= any(ChangeDate >= episode_begin & ChangeDate <= episode_end, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# the residual = unmatched under C but DOES have a same-status form somewhere (the 1,583)
+ruleC_residual <- resid %>%
+  filter(!matched_C, has_form_ever) %>%
+  mutate(
+    why = case_when(
+      any_form_within_episode               ~ "0. form within episode but C said no (BUG - investigate)",
+      any_form_after_episode & !any_form_before_begin ~ "1. only same-status form(s) dated AFTER episode end",
+      any_form_before_begin                 ~ "2. same-status form(s) only BEFORE this episode began (earlier episode)",
+      TRUE                                   ~ "3. other"
+    )
+  )
+
+cat("\n=== RULE C RESIDUAL (unmatched-but-has-same-status-form) ===\n")
+ruleC_residual %>% count(status_form, why) %>% arrange(status_form, why) %>% print(n = 100)
+
+cat("\n=== same, by month (is it left/right edge concentrated?) ===\n")
+ruleC_residual %>% count(MonthSnapshot) %>% arrange(MonthSnapshot) %>% print(n = 100)
+
+cat("\n=== how far is the gap? days between MonthSnapshot and nearest same-status form ===\n")
+ruleC_residual %>%
+  mutate(gap_days = as.numeric(pmin(abs(MonthSnapshot - earliest_form),
+                                    abs(MonthSnapshot - latest_form)))) %>%
+  summarise(
+    n = n(),
+    median_gap_days = median(gap_days, na.rm = TRUE),
+    p90_gap_days    = quantile(gap_days, 0.9, na.rm = TRUE),
+    max_gap_days    = max(gap_days, na.rm = TRUE)
+  ) %>% print()
+```
+
