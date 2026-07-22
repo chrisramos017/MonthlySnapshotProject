@@ -1,0 +1,649 @@
+---
+title: "Weekly Incidence: Allocation Pathways and Device Listings"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float: true
+date: "`r Sys.Date()`"
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(haven)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+
+
+study_start <- as.Date("2024-09-01")   # first week begins
+study_end   <- as.Date("2026-02-28")   # last full week before the 03/01 extract edge
+policy_date <- as.Date("2025-09-01")
+jama_pal <- c("#374E55", "#DF8F44", "#00A1D5", "#B24745", "#79AF97")
+
+```
+---
+
+# Load data
+
+```{r load-data}
+JustFormHRStat1    <- read_sas("/Users/chrisramos/Downloads/JustFormHRStat1.sas7bdat")
+JustFormHRStat2    <- read_sas("/Users/chrisramos/Downloads/JustFormHRStat2.sas7bdat")
+JustFormHRStat3    <- read_sas("/Users/chrisramos/Downloads/JustFormHRStat3.sas7bdat")
+JustFormHRStat4    <- read_sas("/Users/chrisramos/Downloads/JustFormHRStat4.sas7bdat")
+JustFormHR         <- read_sas("/Users/chrisramos/Downloads/JustFormHR.sas7bdat")
+StatHist_Thor      <- read_sas("/Users/chrisramos/Downloads/stathist_thor.sas7bdat")
+JustFormHRDataLink <- read_sas("/Users/chrisramos/Downloads/JustFormHRDataLink.sas7bdat")
+RiskStratDataHR    <- read_sas("/Users/chrisramos/Downloads/RiskStratDataHR.sas7bdat")
+ThorSupportDevice  <- read_sas("/Users/chrisramos/Downloads/ThorSupportDevice.sas7bdat")
+cand               <- read_sas("/Users/chrisramos/Downloads/cand_thor.sas7bdat")
+```
+
+---
+
+# Weekly bins
+
+Weeks are **inclusive 7-day blocks**: 2024-09-22 through 2024-09-28 is week 1,
+2024-09-29 through 2024-10-05 is week 2, and so on. A date is assigned to the week
+whose start is the most recent Sunday on or before it. Same logic for each month,
+with each bin starting on the 1st of the month and ending on the day before the next
+first of month.
+
+```{r weekly-bins and monthly-bins}
+week_starts <- seq.Date(from = study_start, to = study_end - 6, by = "week")
+
+# map any date to the start of the week containing it; NA if outside the window
+week_start <- function(d) {
+  d <- as.Date(d)
+  offset <- as.numeric(d - study_start)
+  ws <- study_start + 7 * (offset %/% 7)
+  ws[is.na(d) | d < study_start | d > study_end] <- NA
+  ws
+}
+
+# sanity: boundaries land where we expect
+tibble(
+  date = as.Date(c("2024-09-22", "2024-09-28", "2024-09-29"))
+) %>%
+  mutate(assigned_week = week_start(date))
+
+length(week_starts)
+range(week_starts)
+
+# ---- Monthly bins (parallel to the weekly ones) ----
+month_starts <- seq.Date(
+  from = as.Date(format(study_start, "%Y-%m-01")),
+  to   = as.Date(format(study_end,   "%Y-%m-01")),
+  by   = "month"
+)
+ 
+# assign any date to the first of its month; NA if outside the window
+month_start <- function(d) {
+  d  <- as.Date(d)
+  ms <- as.Date(format(d, "%Y-%m-01"))
+  ms[is.na(d) | d < study_start | d > study_end] <- NA
+  ms
+}
+```
+
+---
+
+# Adult cohort and patient linkage
+
+Unchanged: Daniel's adult rule, and the `JustId -> PX_ID` bridge.
+
+```{r cohort-and-linkage}
+adult_px <- cand %>%
+  mutate(PX_ID = as.character(PX_ID)) %>%
+  filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 > 17) %>%
+  distinct(PX_ID)
+
+justid_px_lookup_clean <- JustFormHRDataLink %>%
+  mutate(JustId = as.character(JustId), WlregAuditId = as.character(WlregAuditId)) %>%
+  select(JustId, WlregAuditId) %>%
+  left_join(
+    RiskStratDataHR %>%
+      mutate(WlregAuditId = as.character(WlregAuditId)) %>%
+      select(WlregAuditId, px_id),
+    by = "WlregAuditId"
+  ) %>%
+  rename(PX_ID = px_id) %>%
+  mutate(PX_ID = as.character(PX_ID)) %>%
+  select(JustId, PX_ID) %>%
+  distinct(JustId, .keep_all = TRUE)
+```
+
+---
+
+# Device linkage
+
+```{r device-decode}
+device_type_decode <- tribble(
+  ~DeviceTypeId, ~device_label,
+  4L,            "TAH",
+  8L,            "IABP",
+  9L,            "VA ECMO",
+  11L,           "Percutaneous Device",
+  12L,           "Dischargeable VAD",
+  13L,           "Non-Dischargeable VAD"
+)
+
+# The two device types this analysis tracks. "PEVAD" == percutaneous endovascular
+# VAD == Impella, which the device file codes as "Percutaneous Device" (11) and the
+# JustForms code as CriteriaMcsdEndovasSupp.
+iabp_pevad <- c("IABP", "Percutaneous Device")
+```
+
+`device_long` links each device to a patient. `ThorSupportDevice` has no patient key;
+the only bridge is `DeviceId -> JustFormHR$ThorSupportDevicePrimary -> JustId -> PX_ID`.
+
+```{r device-long}
+ThorSupportDevice <- ThorSupportDevice %>%
+  mutate(
+    DeviceId     = as.character(DeviceId),
+    DeviceTypeId = as.integer(DeviceTypeId),
+    ImplantDt    = as.Date(ImplantDt)
+  )
+
+device_justid_bridge <- JustFormHR %>%
+  mutate(
+    JustId                   = as.character(JustId),
+    ThorSupportDevicePrimary = as.character(ThorSupportDevicePrimary)
+  ) %>%
+  filter(!is.na(ThorSupportDevicePrimary)) %>%
+  select(DeviceId = ThorSupportDevicePrimary, JustId) %>%
+  distinct()
+
+device_long <- ThorSupportDevice %>%
+  filter(!is.na(ImplantDt)) %>%
+  inner_join(device_justid_bridge, by = "DeviceId") %>%
+  left_join(justid_px_lookup_clean, by = "JustId") %>%
+  left_join(device_type_decode, by = "DeviceTypeId") %>%
+  filter(!is.na(PX_ID), !is.na(device_label)) %>%
+  semi_join(adult_px, by = "PX_ID") %>%
+  distinct(PX_ID, DeviceId, device_label, ImplantDt)
+```
+
+*Everything is listed based on ImplantDt <= CAN_LISTING_DT from now on; no more assumed explant dates*
+
+---
+
+# JustForm criteria
+
+Status 2 (IABP, PEVAD, exception) comes from the justification forms. Status 3 high-dose inotrope is
+rebuilt from `RiskStratDataHR` per Daniel's code. The only addition is attaching `JustId` to the 
+risk-strat rows first, since that file carries `WlregAuditId` and `PX_ID` but not `JustId`.
+
+```{r justform-shared}
+JustFormHR <- JustFormHR %>%
+  mutate(JustId = as.character(JustId), FormEffectiveDt = as.Date(FormEffectiveDt))
+
+form_effective_lookup <- JustFormHR %>%
+  select(JustId, FormEffectiveDt) %>%
+  distinct(JustId, .keep_all = TRUE)
+
+justform_core <- JustFormHR %>%
+  transmute(JustId, exception = Exception %in% 1) %>%
+  distinct(JustId, .keep_all = TRUE)
+```
+
+```{r stat3-inotrope-riskstrat}
+# Only addition to the provided code: attach JustId (file has WlregAuditId + PX_ID).
+risk_strat_data_hr <- RiskStratDataHR %>%
+  mutate(WlregAuditId = as.character(WlregAuditId)) %>%
+  rename(PX_ID = px_id) %>%                       # file uses lowercase px_id
+  mutate(PX_ID = as.character(PX_ID)) %>%
+  left_join(
+    JustFormHRDataLink %>%
+      mutate(JustId = as.character(JustId), WlregAuditId = as.character(WlregAuditId)) %>%
+      select(JustId, WlregAuditId) %>% distinct(),
+    by = "WlregAuditId"
+  )
+
+stat3_flags_riskstrat <- risk_strat_data_hr %>%
+  mutate(
+    single_high_dose =
+      (CurrTherDobutamine >= 7.5) |
+      (CurrTherMilrinone >= 0.50) |
+      (CurrTherEpinephrine >= 0.02),
+
+    dual_combo =
+      (CurrTherDobutamine >= 3 & CurrTherMilrinone >= 0.25) |
+      (CurrTherDobutamine >= 3 & CurrTherEpinephrine >= 0.01) |
+      (CurrTherDobutamine >= 3 & CurrTherDopamine >= 3) |
+      (CurrTherMilrinone >= 0.25 & CurrTherEpinephrine >= 0.01) |
+      (CurrTherMilrinone >= 0.25 & CurrTherDopamine >= 3) |
+      (CurrTherEpinephrine >= 0.01 & CurrTherDopamine >= 3),
+
+    meets_inotrope_dose_criteria = coalesce(single_high_dose, FALSE) | coalesce(dual_combo, FALSE),
+
+    on_support_at_hemo = HemoObtainedOnSupport %in% c(
+      "Device Support", "Inotrope Support", "Inotrope Support, Device Support"
+    ),
+
+    ci_threshold_met = case_when(
+      on_support_at_hemo ~ HemoCardiacIndex < 2.2,
+      !on_support_at_hemo ~ HemoCardiacIndex < 1.8,
+      TRUE ~ NA
+    ),
+
+    meets_cardiogenic_shock =
+      HemoSbp < 90 &
+      HemoPcwp > 15 &
+      coalesce(ci_threshold_met, FALSE),
+
+    has_hemo_monitoring = !is.na(HemoDataObtained) & HemoDataObtained != "",
+
+    stat3_standard_hd_inotrope =
+      coalesce(has_hemo_monitoring, FALSE) &
+      coalesce(meets_cardiogenic_shock, FALSE) &
+      coalesce(meets_inotrope_dose_criteria, FALSE)
+  ) %>%
+  group_by(PX_ID, JustId) %>%
+  summarise(
+    stat3_standard_hd_inotrope = any(stat3_standard_hd_inotrope, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+stat3_flags_riskstrat %>% count(stat3_standard_hd_inotrope)
+```
+
+```{r justform-events}
+#Tracking events from justification forms
+JustFormHRStat2 <- JustFormHRStat2 %>%
+  mutate(JustId = as.character(JustId)) %>%
+  left_join(form_effective_lookup, by = "JustId")
+
+# RequestedCandStatCd lives on JustFormHR (not the StatN tables); pull it by JustId
+requested_stat_lookup <- JustFormHR %>%
+  mutate(JustId = as.character(JustId)) %>%
+  select(JustId, RequestedCandStatCd) %>%
+  distinct(JustId, .keep_all = TRUE)
+
+status2_events <- JustFormHRStat2 %>%
+  left_join(requested_stat_lookup, by = "JustId") %>%
+  transmute(
+    JustId, FormEffectiveDt, status_form = "Adult Status 2",
+    RequestedCandStatCd,                              # carry status code to match against CAN_INIT_STAT at listing
+    iabp          = CriteriaIabpSupport %in% 1,
+    pevad         = CriteriaMcsdEndovasSupp %in% 1,
+    inotrope_high = FALSE
+  )
+
+# Status 3 high-dose
+status3_events <- stat3_flags_riskstrat %>%
+  filter(stat3_standard_hd_inotrope) %>%
+  mutate(JustId = as.character(JustId)) %>%
+  left_join(form_effective_lookup, by = "JustId") %>%
+  left_join(requested_stat_lookup, by = "JustId") %>%
+  transmute(
+    JustId, FormEffectiveDt, status_form = "Adult Status 3",
+    RequestedCandStatCd,
+    iabp          = FALSE,
+    pevad         = FALSE,
+    inotrope_high = TRUE
+  )
+
+justform_events <- bind_rows(status2_events, status3_events) %>%
+  left_join(justform_core, by = "JustId") %>%
+  left_join(justid_px_lookup_clean, by = "JustId") %>%
+  mutate(PX_ID = as.character(PX_ID)) %>%
+  filter(!is.na(PX_ID), !is.na(FormEffectiveDt)) %>%
+  semi_join(adult_px, by = "PX_ID") %>%
+  mutate(week = week_start(FormEffectiveDt)) %>%
+  filter(!is.na(week))
+
+# high-dose Status 3 events landing in-window
+justform_events %>% filter(status_form == "Adult Status 3", inotrope_high) %>% nrow()
+nrow(justform_events)
+
+justform_events
+```
+
+---
+
+# Graph 1: Weekly counts by allocation pathway
+
+Five lines. Four are **form events**, tallied by `FormEffectiveDt`:
+
+- Status 2 IABP
+- Status 2 PEVAD (Impella / percutaneous)
+- Status 3 high-dose inotropes; linked to just_form, counted from riskstrat
+- Status 2 Exceptions (total)
+
+The fifth is a **device event**, tallied by `ImplantDt`: every IABP or percutaneous
+device implanted that week, regardless of what any form says.
+
+```{r graph1-data}
+
+#Start from each patient's initial listing dates, look up whether they had an
+#IABP/PEVAD on or before the listing date -> flag the event as yes/no for device 
+listing_device_flag <- cand %>%
+  mutate(PX_ID = as.character(PX_ID), CAN_LISTING_DT = as.Date(CAN_LISTING_DT)) %>%
+  semi_join(adult_px, by = "PX_ID") %>%
+  select(PX_ID, CAN_LISTING_DT) %>%
+  filter(!is.na(CAN_LISTING_DT)) %>%
+  left_join(
+    device_long %>%
+      filter(device_label %in% iabp_pevad) %>%
+      select(PX_ID, ImplantDt),
+    by = "PX_ID",
+    relationship = "many-to-many"
+  ) %>%
+  mutate(device_at_listing = !is.na(ImplantDt) & ImplantDt <= CAN_LISTING_DT) %>%
+  group_by(PX_ID, CAN_LISTING_DT) %>%
+  summarise(device_at_listing = any(device_at_listing), .groups = "drop")
+
+# One row per NEW LISTING, carrying the initial-listing form's flags + device flag.
+# The initial-listing justification is identified by matching the form's requested
+# status to the candidate's initial status AND the form's effective date to the
+# listing date. No need for governing form, since we are grabbing only justification
+# on the date of initial listing (also checks for matching status).
+listing_base <- cand %>%
+  mutate(PX_ID = as.character(PX_ID), CAN_LISTING_DT = as.Date(CAN_LISTING_DT)) %>%
+  semi_join(adult_px, by = "PX_ID") %>%
+  filter(!is.na(CAN_LISTING_DT)) %>%
+  select(PX_ID, CAN_LISTING_DT, CAN_INIT_STAT) %>%
+  inner_join(
+    justform_events %>%
+      select(PX_ID, FormEffectiveDt, RequestedCandStatCd,
+             iabp, pevad, inotrope_high, exception),
+    by = "PX_ID",
+    relationship = "many-to-many"
+  ) %>%
+  filter(
+    CAN_INIT_STAT == RequestedCandStatCd,   # form's requested status == initial listing status
+    FormEffectiveDt == CAN_LISTING_DT        # form effective on the listing date
+  ) %>%
+  group_by(PX_ID, CAN_LISTING_DT, CAN_INIT_STAT) %>%
+  summarise(                                 # collapse in case a listing matched >1 form (should be rare/none)
+    iabp          = any(iabp %in% TRUE),
+    pevad         = any(pevad %in% TRUE),
+    inotrope_high = any(inotrope_high %in% TRUE),
+    exception     = any(exception %in% TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(listing_device_flag, by = c("PX_ID", "CAN_LISTING_DT")) %>%
+  mutate(
+    device_at_listing = coalesce(device_at_listing, FALSE),
+    week  = week_start(CAN_LISTING_DT),
+    month = month_start(CAN_LISTING_DT)
+  )
+
+# did any listing match more than one form? (expect 0)
+listing_base %>% count(PX_ID, CAN_LISTING_DT) %>% filter(n > 1)
+
+# Name lines to prevent silent drops for no event cases
+pathway_levels <- c(
+  "Status 2: IABP",
+  "Status 2: PEVAD",
+  "Status 3: High-dose inotropes",
+  "Status 2: Exception",
+  "New listings with IABP/PEVAD at listing"
+)
+
+# Each line = count of new listings meeting one condition, per week
+graph1_data <- bind_rows(
+  listing_base %>% filter(CAN_INIT_STAT == 2120, iabp)          
+  %>% count(week, name = "n") %>% mutate(pathway = "Status 2: IABP"),
+  
+  listing_base %>% filter(CAN_INIT_STAT == 2120, pevad)         
+  %>% count(week, name = "n") %>% mutate(pathway = "Status 2: PEVAD"),
+  
+  listing_base %>% filter(CAN_INIT_STAT == 2130, inotrope_high) 
+  %>% count(week, name = "n") %>% mutate(pathway = "Status 3: High-dose inotropes"),
+  
+  listing_base %>% filter(CAN_INIT_STAT == 2120, exception)     
+  %>% count(week, name = "n") %>% mutate(pathway = "Status 2: Exception"),
+  
+  listing_base %>% filter(device_at_listing)                   
+  %>% count(week, name = "n") %>% mutate(pathway = "New listings with IABP/PEVAD at listing")
+) %>%
+  mutate(pathway = factor(pathway, levels = pathway_levels)) %>%
+  complete(week = week_starts, pathway = pathway_levels, fill = list(n = 0)) %>%
+  arrange(pathway, week)
+
+# all five present? (expect 5)
+n_distinct(graph1_data$pathway)
+
+graph1_data %>% group_by(pathway) %>% summarise(total_events = sum(n), .groups = "drop")
+```
+
+```{r graph1-plot, fig.width=12, fig.height=6}
+ggplot(graph1_data, aes(x = week, y = n, color = pathway)) +
+  geom_line() +
+  geom_point(size = 0.9) +
+  geom_vline(xintercept = policy_date, linetype = "dashed") +
+  scale_color_manual(values = jama_pal) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%m/%Y") +
+  labs(
+    title = "Weekly Incidences",
+    subtitle = "Form events at FormEffectiveDt; listings at CAN_LISTING_DT",
+    x = "Week beginning", y = "Count of events", color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  ) +
+  guides(color = guide_legend(nrow = 2))
+```
+```{r graph 1 monthly data} 
+# Same lines as weekly, binned by month. listing_base already carries a `month` column.
+graph1_data_monthly <- bind_rows(
+  listing_base %>% filter(CAN_INIT_STAT == 2120, iabp)          
+  %>% count(month, name = "n") %>% mutate(pathway = "Status 2: IABP"),
+  
+  listing_base %>% filter(CAN_INIT_STAT == 2120, pevad)         
+  %>% count(month, name = "n") %>% mutate(pathway = "Status 2: PEVAD"),
+  
+  listing_base %>% filter(CAN_INIT_STAT == 2130, inotrope_high) 
+  %>% count(month, name = "n") %>% mutate(pathway = "Status 3: High-dose inotropes"),
+  
+  listing_base %>% filter(CAN_INIT_STAT == 2120, exception)    
+  %>% count(month, name = "n") %>% mutate(pathway = "Status 2: Exception"),
+  
+  listing_base %>% filter(device_at_listing)                   
+  %>% count(month, name = "n") %>% mutate(pathway = "New listings with IABP/PEVAD at listing")
+) %>%
+  mutate(pathway = factor(pathway, levels = pathway_levels)) %>%
+  complete(month = month_starts, pathway = pathway_levels, fill = list(n = 0)) %>%
+  arrange(pathway, month)
+ 
+graph1_data_monthly %>% group_by(pathway) %>% summarise(total_events = sum(n), .groups = "drop")
+```
+
+```{r graph1 monthly plots}
+ggplot(graph1_data_monthly, aes(x = month, y = n, color = pathway)) +
+  geom_line() +
+  geom_point(size = 0.9) +
+  geom_vline(xintercept = policy_date, linetype = "dashed") +
+  scale_color_manual(values = jama_pal) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%m/%Y") +
+  labs(
+    title = "Monthly Incidences",
+    subtitle = "Form events at FormEffectiveDt; listings at CAN_LISTING_DT",
+    x = "Month beginning", y = "Count of events", color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  ) +
+  guides(color = guide_legend(nrow = 2))
+```
+
+---
+
+# Graph 2: Status 2 exception listings, with vs without IABP/PEVAD
+
+The exact Status 2 exception population from the Graph 1 line, split by the device
+flag. It is `listing_base` filtered to `CAN_INIT_STAT == 2120 & exception`, divided
+by `device_at_listing` (IABP/PEVAD implanted on or before `CAN_LISTING_DT`).
+
+A listing counts as **WITH device** if its `device_at_listing` flag is TRUE,
+**WITHOUT** if FALSE. One row per listing, binned by `CAN_LISTING_DT`.
+
+```{r graph2-data}
+# Graph 2 is the exact Status 2 exception population from graph1_data, split by the
+# device flag already on listing_base. Same rows, divided by device_at_listing.
+group_levels <- c("Exception WITH IABP/PEVAD", "Exception WITHOUT IABP/PEVAD")
+
+graph2_data <- listing_base %>%
+  filter(CAN_INIT_STAT == 2120, exception, !is.na(week)) %>%
+  mutate(group = if_else(device_at_listing,
+                         "Exception WITH IABP/PEVAD",
+                         "Exception WITHOUT IABP/PEVAD")) %>%
+  count(week, group, name = "n") %>%
+  complete(week = week_starts, group = group_levels, fill = list(n = 0)) %>%
+  arrange(group, week)
+
+# totals and share with device
+graph2_data %>%
+  group_by(group) %>%
+  summarise(total = sum(n), .groups = "drop") %>%
+  mutate(pct = round(100 * total / sum(total), 1))
+```
+
+```{r graph2-check}
+# the two groups must sum to the total S2 exception listings per week (expect 0 rows)
+graph2_data %>%
+  group_by(week) %>%
+  summarise(split_total = sum(n), .groups = "drop") %>%
+  left_join(
+    listing_base %>%
+      filter(CAN_INIT_STAT == 2120, exception) %>%
+      filter(!is.na(week)) %>%
+      count(week, name = "exception_total"),
+    by = "week"
+  ) %>%
+  mutate(exception_total = coalesce(exception_total, 0L)) %>%
+  filter(split_total != exception_total)
+```
+
+```{r graph2-plot, fig.width=12, fig.height=6}
+ggplot(graph2_data, aes(x = week, y = n, color = group)) +
+  geom_line() +
+  geom_point(size = 0.9) +
+  geom_vline(xintercept = policy_date, linetype = "dashed") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%m/%Y") +
+  scale_color_manual(values = c(
+    "Exception WITH IABP/PEVAD"    = "#B24745",
+    "Exception WITHOUT IABP/PEVAD" = "#374E55"
+  )) +
+  labs(
+    title = "Weekly Status 2 Exception Listings, by IABP/PEVAD at Listing",
+    subtitle = "Device evaluated at CAN_LISTING_DT; governing form determines exception status",
+    x = "Week beginning", y = "Count of exception listings", color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom")
+```
+```{r graph2 monthly data}
+graph2_data_monthly <- listing_base %>%
+  filter(CAN_INIT_STAT == 2120, exception, !is.na(month)) %>%
+  mutate(group = if_else(device_at_listing,
+                         "Exception WITH IABP/PEVAD",
+                         "Exception WITHOUT IABP/PEVAD")) %>%
+  count(month, group, name = "n") %>%
+  complete(month = month_starts, group = group_levels, fill = list(n = 0)) %>%
+  arrange(group, month)
+ 
+graph2_data_monthly %>%
+  group_by(group) %>%
+  summarise(total = sum(n), .groups = "drop") %>%
+  mutate(pct = round(100 * total / sum(total), 1))
+```
+
+```{r graph2 monthly plots}
+ggplot(graph2_data_monthly, aes(x = month, y = n, color = group)) +
+  geom_line() +
+  geom_point(size = 0.9) +
+  geom_vline(xintercept = policy_date, linetype = "dashed") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%m/%Y") +
+  scale_color_manual(values = c(
+    "Exception WITH IABP/PEVAD"    = "#B24745",
+    "Exception WITHOUT IABP/PEVAD" = "#374E55"
+  )) +
+  labs(
+    title = "Monthly Status 2 Exception Listings, by IABP/PEVAD at Listing",
+    subtitle = "Device evaluated at CAN_LISTING_DT; governing form determines exception status",
+    x = "Month beginning", y = "Count of exception listings", color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom")
+```
+
+---
+
+# Date coincidence check
+
+Checking how often the listing date and justification form date does not line up, since those listed patients are getting dropped out of the analysis fully -> 3.2% of status 2/3 listings are dropped
+
+```{r date-coincidence-check}
+no_exact_prior <- cand %>%
+  mutate(PX_ID = as.character(PX_ID), CAN_LISTING_DT = as.Date(CAN_LISTING_DT)) %>%
+  semi_join(adult_px, by = "PX_ID") %>%
+  filter(CAN_INIT_STAT %in% c(2120, 2130), !is.na(CAN_LISTING_DT)) %>%
+  distinct(PX_ID, CAN_LISTING_DT, CAN_INIT_STAT) %>%
+  left_join(
+    justform_events %>% select(PX_ID, FormEffectiveDt, RequestedCandStatCd),
+    by = "PX_ID", relationship = "many-to-many"
+  ) %>%
+  filter(CAN_INIT_STAT == RequestedCandStatCd) %>%
+  group_by(PX_ID, CAN_LISTING_DT, CAN_INIT_STAT) %>%
+  summarise(
+    has_exact    = any(FormEffectiveDt == CAN_LISTING_DT),
+    prior_form_dt = {
+      before <- FormEffectiveDt[FormEffectiveDt < first(CAN_LISTING_DT)]
+      if (length(before) == 0) as.Date(NA) else max(before)
+    },
+    .groups = "drop"
+  ) %>%
+  filter(!has_exact) %>%
+  mutate(days_before_listing = as.numeric(CAN_LISTING_DT - prior_form_dt)) %>%
+  arrange(days_before_listing) %>%
+  select(PX_ID, CAN_INIT_STAT, CAN_LISTING_DT, prior_form_dt, days_before_listing)
+
+no_exact_prior
+#justification form is never preceding listing date; the issue is not a delay in
+#registering patient as listed; have to investigate delay on registering justification
+#form following listing
+
+gap_dist <- cand %>%
+  mutate(PX_ID = as.character(PX_ID), CAN_LISTING_DT = as.Date(CAN_LISTING_DT)) %>%
+  semi_join(adult_px, by = "PX_ID") %>%
+  filter(CAN_INIT_STAT %in% c(2120, 2130), !is.na(CAN_LISTING_DT)) %>%
+  distinct(PX_ID, CAN_LISTING_DT, CAN_INIT_STAT) %>%
+  left_join(
+    justform_events %>% select(PX_ID, FormEffectiveDt, RequestedCandStatCd),
+    by = "PX_ID", relationship = "many-to-many"
+  ) %>%
+  filter(CAN_INIT_STAT == RequestedCandStatCd) %>%
+  group_by(PX_ID, CAN_LISTING_DT) %>%
+  summarise(
+    # signed gap of the NEAREST form to listing (min absolute distance, keeping sign)
+    nearest_gap = {
+      g <- as.numeric(FormEffectiveDt - first(CAN_LISTING_DT))
+      g[which.min(abs(g))]
+    },
+    .groups = "drop"
+  )
+
+# counts per day-gap
+gap_dist %>%
+  filter(nearest_gap != 0, abs(nearest_gap) <= 30) %>%
+  ggplot(aes(x = nearest_gap)) +
+  geom_bar() +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(-30, 30, 5)) +
+  labs(
+    title = "Nearest justification form relative to listing date (exact matches excluded)",
+    subtitle = "Negative = form before listing; positive = form after",
+    x = "Days from listing date", y = "Number of listings"
+  ) +
+  theme_minimal(base_size = 12)
+
+#a few patient's initial listing showed no justification form, and no form appears until
+#mult. days later, likely to extend or change a status; excluding these people
+```
