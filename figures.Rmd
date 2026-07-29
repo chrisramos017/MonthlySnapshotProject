@@ -1,0 +1,230 @@
+---
+title: "figures ava"
+output: html_document
+date: "2026-07-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+#FIGURE 1: 07/11/26
+
+#load canthor
+library(haven)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+
+cand_thor <- read_sas("/Users/chrisramos/Desktop/HCA_Summer_26/Data/cand_thor.sas7bdat")
+```
+
+
+```{r}
+#monthly
+
+monthly_new_listings <- cand_thor %>%
+  mutate(
+    
+    CAN_LISTING_DT = as.Date(CAN_LISTING_DT),
+    
+    month = floor_date(CAN_LISTING_DT, unit = "month"),
+    
+    listing_status = factor(
+      CAN_INIT_STAT,
+      levels = c(
+        2110,
+        2120,
+        2130,
+        2140,
+        2150,
+        2160
+      ),
+      labels = c(
+        "Status 1",
+        "Status 2",
+        "Status 3",
+        "Status 4",
+        "Status 5",
+        "Status 6"
+      )
+    )
+    
+  ) %>%
+  
+  filter(
+    month >= as.Date("2024-09-01"),
+    month <= as.Date("2026-02-28"),
+    !is.na(listing_status)
+  ) %>%
+  
+  count(month, listing_status)
+```
+
+
+```{r}
+#plot
+ggplot(
+  monthly_new_listings,
+  aes(
+    x = month,
+    y = n,
+    color = listing_status,
+    group = listing_status
+  )
+) +
+  
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  
+  scale_color_manual(
+    values = c(
+      "Status 1" = "#d93dd0",
+      "Status 2" = "#4f7ae5",
+      "Status 3" = "#2ca9b3",
+      "Status 4" = "#1db321",
+      "Status 5" = "#b59a00",
+      "Status 6" = "#f45a57"
+    ),
+    breaks = c(
+      "Status 1",
+      "Status 2",
+      "Status 3",
+      "Status 4",
+      "Status 5",
+      "Status 6"
+    )
+  ) +
+  
+  scale_x_date(
+    date_breaks = "2 months",
+    date_labels = "%b\n%Y",
+    limits = c(
+      as.Date("2024-09-01"),
+      as.Date("2026-02-28")
+    )
+  ) +
+  
+  labs(
+    title = "Monthly New Adult Heart Waitlist Listings by Listing Status",
+    subtitle = "September 2024–February 2026",
+    x = NULL,
+    y = "Number of new listings",
+    color = "Listing Status"
+  ) +
+  
+  theme_classic(base_size = 18) +
+  
+  theme(
+    plot.title = element_text(face = "bold", size = 22),
+    plot.subtitle = element_text(size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.y = element_text(face = "bold"),
+    legend.position = "right",
+    legend.title = element_text(face = "bold")
+  )
+```
+
+
+```{r}
+#week version of figure 1
+
+#week
+
+weekly_new_listings <- cand_thor %>%
+  mutate(
+    
+    CAN_LISTING_DT = as.Date(CAN_LISTING_DT),
+    
+    week = floor_date(CAN_LISTING_DT, unit = "week"),
+    
+    listing_status = factor(
+      CAN_INIT_STAT,
+      levels = c(
+        2110,
+        2120,
+        2130,
+        2140,
+        2150,
+        2160
+      ),
+      labels = c(
+        "Status 1",
+        "Status 2",
+        "Status 3",
+        "Status 4",
+        "Status 5",
+        "Status 6"
+      )
+    )
+    
+  ) %>%
+  
+  filter(
+    week >= as.Date("2024-09-01"),
+    week <= as.Date("2026-02-28"),
+    !is.na(listing_status)
+  ) %>%
+  
+  count(week, listing_status)
+
+#plot
+
+ggplot(
+  weekly_new_listings,
+  aes(
+    x = week,
+    y = n,
+    color = listing_status,
+    group = listing_status
+  )
+) +
+  
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 1.8) +
+  
+  scale_color_manual(
+    values = c(
+      "Status 1"="#d93dd0",
+      "Status 2"="#4f7ae5",
+      "Status 3"="#2ca9b3",
+      "Status 4"="#1db321",
+      "Status 5"="#b59a00",
+      "Status 6"="#f45a57"
+    )
+  ) +
+  
+  scale_x_date(
+    date_breaks = "2 months",
+    date_labels = "%b\n%Y"
+  ) +
+  
+  labs(
+    title = "Weekly New Adult Heart Waitlist Listings by Listing Status",
+    subtitle = "September 2024–February 2026",
+    x = NULL,
+    y = "Number of new listings",
+    color = "Listing Status"
+  ) +
+  
+  theme_classic(base_size = 18) +
+  
+  theme(
+    plot.title = element_text(face="bold", size=22),
+    plot.subtitle = element_text(size=16),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.y = element_text(face="bold"),
+    legend.position = "right",
+    legend.title = element_text(face="bold")
+  )
+
+
+
+
+
+
+```
+
