@@ -1,0 +1,1007 @@
+---
+title: "table 1"
+output: html_document
+date: "2026-07-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#table 1  version 3 w christians variables
+
+library(haven)
+library(dplyr)
+library(tidyr)
+library(gtsummary)
+library(lubridate)
+
+```
+
+
+```{r}
+#load data
+
+data_path <- normalizePath("~/Desktop/HCA_Summer_26/Data")
+
+data_path
+
+library(haven)
+
+cand <- read_sas(file.path(data_path, "cand_thor.sas7bdat"))
+
+JustFormHR <- read_sas(file.path(data_path, "JustFormHR.sas7bdat"))
+
+JustFormHRStat1 <- read_sas(file.path(data_path, "JustFormHRStat1.sas7bdat"))
+
+JustFormHRStat2 <- read_sas(file.path(data_path, "JustFormHRStat2.sas7bdat"))
+
+JustFormHRStat3 <- read_sas(file.path(data_path, "JustFormHRStat3.sas7bdat"))
+
+JustFormHRStat4 <- read_sas(file.path(data_path, "JustFormHRStat4.sas7bdat"))
+
+RiskStratDataHR <- read_sas(file.path(data_path, "RiskStratDataHR.sas7bdat"))
+
+ThorSupportDevice <- read_sas(file.path(data_path, "ThorSupportDevice.sas7bdat"))
+
+StatHist_Thor <- read_sas(file.path(data_path, "stathist_thor.sas7bdat"))
+
+JustFormHRDataLink <- read_sas(file.path(data_path, "JustFormHRDataLink.sas7bdat"))
+
+names(cand)[1:5]
+
+names(JustFormHR)[1:5]
+
+names(JustFormHRStat2)[1:5]
+
+names(RiskStratDataHR)[1:5]
+
+names(ThorSupportDevice)[1:5]
+
+names(JustFormHRDataLink)[1:5]
+```
+
+
+```{r}
+#seasonally matched 
+pre_start  <- as.Date("2024-09-22")
+pre_end    <- as.Date("2025-02-28")
+
+post_start <- as.Date("2025-09-22")
+post_end   <- as.Date("2026-02-28")
+```
+
+
+```{r}
+#build 
+study <- cand %>%
+  mutate(
+    PX_ID = as.character(PX_ID),
+    CAN_LISTING_DT = as.Date(CAN_LISTING_DT)
+  ) %>%
+  filter(
+    WL_ORG == "HR",
+    CAN_AGE_AT_LISTING >= 18,
+    (
+      CAN_LISTING_DT >= pre_start &
+        CAN_LISTING_DT <= pre_end
+    ) |
+      (
+        CAN_LISTING_DT >= post_start &
+          CAN_LISTING_DT <= post_end
+      )
+  ) %>%
+  mutate(
+    policy_group = if_else(
+      CAN_LISTING_DT < as.Date("2025-09-17"),
+      "Pre",
+      "Post"
+    )
+  )
+#adult heart  cohort
+adult_px <- cand %>%
+  mutate(
+    PX_ID = as.character(PX_ID)
+  ) %>%
+  filter(
+    CAN_AGE_IN_MONTHS_AT_LISTING / 12 > 17
+  ) %>%
+  distinct(PX_ID)
+```
+
+
+```{r}
+#justification forms
+justid_px_lookup_clean <-
+  JustFormHRDataLink %>%
+  mutate(
+    JustId = as.character(JustId),
+    WlregAuditId = as.character(WlregAuditId)
+  ) %>%
+  select(
+    JustId,
+    WlregAuditId
+  ) %>%
+  left_join(
+    
+    RiskStratDataHR %>%
+      mutate(
+        WlregAuditId = as.character(WlregAuditId)
+      ) %>%
+      select(
+        WlregAuditId,
+        px_id
+      ),
+    
+    by = "WlregAuditId"
+    
+  ) %>%
+  rename(
+    PX_ID = px_id
+  ) %>%
+  mutate(
+    PX_ID = as.character(PX_ID)
+  ) %>%
+  select(
+    JustId,
+    PX_ID
+  ) %>%
+  distinct(
+    JustId,
+    .keep_all = TRUE
+  )
+```
+
+
+```{r}
+#device types
+device_type_decode <- tribble(
+  
+  ~DeviceTypeId, ~device_label,
+  
+  4L,  "TAH",
+  
+  8L,  "IABP",
+  
+  9L,  "VA ECMO",
+  
+  11L, "Percutaneous Device",
+  
+  12L, "Dischargeable VAD",
+  
+  13L, "Non-Dischargeable VAD"
+  
+)
+
+iabp_pevad <- c(
+  
+  "IABP",
+  
+  "Percutaneous Device"
+  
+)
+```
+
+
+```{r}
+#device linkage
+ThorSupportDevice <- ThorSupportDevice %>%
+  mutate(
+    DeviceId = as.character(DeviceId),
+    DeviceTypeId = as.integer(DeviceTypeId),
+    ImplantDt = as.Date(ImplantDt)
+  )
+
+device_justid_bridge <- JustFormHR %>%
+  mutate(
+    JustId = as.character(JustId),
+    ThorSupportDevicePrimary = as.character(ThorSupportDevicePrimary)
+  ) %>%
+  filter(!is.na(ThorSupportDevicePrimary)) %>%
+  select(
+    DeviceId = ThorSupportDevicePrimary,
+    JustId
+  ) %>%
+  distinct()
+
+device_long <- ThorSupportDevice %>%
+  filter(!is.na(ImplantDt)) %>%
+  inner_join(
+    device_justid_bridge,
+    by = "DeviceId"
+  ) %>%
+  left_join(
+    justid_px_lookup_clean,
+    by = "JustId"
+  ) %>%
+  left_join(
+    device_type_decode,
+    by = "DeviceTypeId"
+  ) %>%
+  filter(
+    !is.na(PX_ID),
+    !is.na(device_label)
+  ) %>%
+  semi_join(
+    adult_px,
+    by = "PX_ID"
+  ) %>%
+  distinct(
+    PX_ID,
+    DeviceId,
+    device_label,
+    ImplantDt
+  )
+```
+
+
+```{r}
+#just forms
+JustFormHR <- JustFormHR %>%
+  mutate(
+    JustId = as.character(JustId),
+    FormEffectiveDt = as.Date(FormEffectiveDt)
+  )
+
+form_effective_lookup <- JustFormHR %>%
+  select(
+    JustId,
+    FormEffectiveDt
+  ) %>%
+  distinct(
+    JustId,
+    .keep_all = TRUE
+  )
+
+justform_core <- JustFormHR %>%
+  transmute(
+    JustId,
+    exception = Exception %in% 1
+  ) %>%
+  distinct(
+    JustId,
+    .keep_all = TRUE
+  )
+```
+
+
+```{r}
+#status 3
+risk_strat_data_hr <- RiskStratDataHR %>%
+  mutate(
+    WlregAuditId = as.character(WlregAuditId)
+  ) %>%
+  rename(
+    PX_ID = px_id
+  ) %>%
+  mutate(
+    PX_ID = as.character(PX_ID)
+  ) %>%
+  left_join(
+    JustFormHRDataLink %>%
+      mutate(
+        JustId = as.character(JustId),
+        WlregAuditId = as.character(WlregAuditId)
+      ) %>%
+      select(
+        JustId,
+        WlregAuditId
+      ) %>%
+      distinct(),
+    by = "WlregAuditId"
+  )
+stat3_flags_riskstrat <- risk_strat_data_hr %>%
+  mutate(
+    
+    # High-dose single inotrope
+    single_high_dose =
+      (CurrTherDobutamine >= 7.5) |
+      (CurrTherMilrinone >= 0.50) |
+      (CurrTherEpinephrine >= 0.02),
+    
+    # High-dose combination therapy
+    dual_combo =
+      (CurrTherDobutamine >= 3 &
+         CurrTherMilrinone >= 0.25) |
+      
+      (CurrTherDobutamine >= 3 &
+         CurrTherEpinephrine >= 0.01) |
+      
+      (CurrTherDobutamine >= 3 &
+         CurrTherDopamine >= 3) |
+      
+      (CurrTherMilrinone >= 0.25 &
+         CurrTherEpinephrine >= 0.01) |
+      
+      (CurrTherMilrinone >= 0.25 &
+         CurrTherDopamine >= 3) |
+      
+      (CurrTherEpinephrine >= 0.01 &
+         CurrTherDopamine >= 3),
+    
+    meets_inotrope_dose_criteria =
+      coalesce(single_high_dose, FALSE) |
+      coalesce(dual_combo, FALSE),
+    
+    # Hemodynamics obtained on support?
+    on_support_at_hemo =
+      HemoObtainedOnSupport %in%
+      c(
+        "Device Support",
+        "Inotrope Support",
+        "Inotrope Support, Device Support"
+      ),
+    
+    ci_threshold_met =
+      case_when(
+        on_support_at_hemo ~ HemoCardiacIndex < 2.2,
+        !on_support_at_hemo ~ HemoCardiacIndex < 1.8,
+        TRUE ~ NA
+      ),
+    
+    meets_cardiogenic_shock =
+      HemoSbp < 90 &
+      HemoPcwp > 15 &
+      coalesce(ci_threshold_met, FALSE),
+    
+    has_hemo_monitoring =
+      !is.na(HemoDataObtained) &
+      HemoDataObtained != "",
+    
+    stat3_standard_hd_inotrope =
+      coalesce(has_hemo_monitoring, FALSE) &
+      coalesce(meets_cardiogenic_shock, FALSE) &
+      coalesce(meets_inotrope_dose_criteria, FALSE)
+    
+  ) %>%
+  group_by(PX_ID, JustId) %>%
+  summarise(
+    stat3_standard_hd_inotrope =
+      any(stat3_standard_hd_inotrope, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+
+```{r}
+#status 2
+
+JustFormHRStat2 <- JustFormHRStat2 %>%
+  mutate(
+    JustId = as.character(JustId)
+  ) %>%
+  left_join(
+    form_effective_lookup,
+    by = "JustId"
+  )
+
+requested_stat_lookup <- JustFormHR %>%
+  mutate(
+    JustId = as.character(JustId)
+  ) %>%
+  select(
+    JustId,
+    RequestedCandStatCd
+  ) %>%
+  distinct(
+    JustId,
+    .keep_all = TRUE
+  )
+
+status2_events <- JustFormHRStat2 %>%
+  left_join(
+    requested_stat_lookup,
+    by = "JustId"
+  ) %>%
+  transmute(
+    
+    JustId,
+    
+    FormEffectiveDt,
+    
+    RequestedCandStatCd,
+    
+    iabp =
+      CriteriaIabpSupport %in% 1,
+    
+    pevad =
+      CriteriaMcsdEndovasSupp %in% 1,
+    
+    inotrope_high = FALSE
+    
+  )
+```
+
+
+```{r}
+#status 3 events
+status3_events <-
+  stat3_flags_riskstrat %>%
+  filter(
+    stat3_standard_hd_inotrope
+  ) %>%
+  mutate(
+    JustId = as.character(JustId)
+  ) %>%
+  left_join(
+    form_effective_lookup,
+    by = "JustId"
+  ) %>%
+  left_join(
+    requested_stat_lookup,
+    by = "JustId"
+  ) %>%
+  transmute(
+    
+    JustId,
+    
+    FormEffectiveDt,
+    
+    RequestedCandStatCd,
+    
+    iabp = FALSE,
+    
+    pevad = FALSE,
+    
+    inotrope_high = TRUE
+    
+  )
+```
+
+
+```{r}
+#combine justification events
+justform_events <-
+  bind_rows(
+    status2_events,
+    status3_events
+  ) %>%
+  left_join(
+    justform_core,
+    by = "JustId"
+  ) %>%
+  left_join(
+    justid_px_lookup_clean,
+    by = "JustId"
+  ) %>%
+  mutate(
+    PX_ID = as.character(PX_ID)
+  ) %>%
+  filter(
+    !is.na(PX_ID),
+    !is.na(FormEffectiveDt)
+  ) %>%
+  semi_join(
+    adult_px,
+    by = "PX_ID"
+  )
+```
+
+
+```{r}
+#device at inital listing
+listing_device_flag <-
+  cand %>%
+  mutate(
+    PX_ID = as.character(PX_ID),
+    CAN_LISTING_DT = as.Date(CAN_LISTING_DT)
+  ) %>%
+  semi_join(
+    adult_px,
+    by = "PX_ID"
+  ) %>%
+  select(
+    PX_ID,
+    CAN_LISTING_DT
+  ) %>%
+  filter(
+    !is.na(CAN_LISTING_DT)
+  ) %>%
+  left_join(
+    
+    device_long %>%
+      filter(
+        device_label %in% iabp_pevad
+      ) %>%
+      select(
+        PX_ID,
+        ImplantDt
+      ),
+    
+    by = "PX_ID",
+    relationship = "many-to-many"
+    
+  ) %>%
+  mutate(
+    device_at_listing =
+      !is.na(ImplantDt) &
+      ImplantDt <= CAN_LISTING_DT
+  ) %>%
+  group_by(
+    PX_ID,
+    CAN_LISTING_DT
+  ) %>%
+  summarise(
+    device_at_listing =
+      any(device_at_listing),
+    .groups = "drop"
+  )
+#
+study <- study %>%
+  left_join(
+    listing_device_flag %>%
+      select(PX_ID, CAN_LISTING_DT, device_at_listing),
+    by = c("PX_ID", "CAN_LISTING_DT")
+  ) %>%
+  mutate(
+    device_at_listing = if_else(
+      is.na(device_at_listing),
+      FALSE,
+      device_at_listing
+    )
+  )
+```
+
+
+```{r}
+#build listing base
+listing_base <-
+  cand %>%
+  mutate(
+    PX_ID = as.character(PX_ID),
+    CAN_LISTING_DT = as.Date(CAN_LISTING_DT)
+  ) %>%
+  semi_join(
+    adult_px,
+    by = "PX_ID"
+  ) %>%
+  filter(
+    !is.na(CAN_LISTING_DT)
+  ) %>%
+  select(
+    PX_ID,
+    CAN_LISTING_DT,
+    CAN_INIT_STAT
+  ) %>%
+  inner_join(
+    
+    justform_events %>%
+      select(
+        PX_ID,
+        FormEffectiveDt,
+        RequestedCandStatCd,
+        iabp,
+        pevad,
+        inotrope_high,
+        exception
+      ),
+    
+    by = "PX_ID",
+    relationship = "many-to-many"
+    
+  ) %>%
+  filter(
+    
+    CAN_INIT_STAT ==
+      RequestedCandStatCd,
+    
+    FormEffectiveDt ==
+      CAN_LISTING_DT
+    
+  ) %>%
+  group_by(
+    PX_ID,
+    CAN_LISTING_DT,
+    CAN_INIT_STAT
+  ) %>%
+  summarise(
+    
+    exception =
+      any(exception),
+    
+    iabp =
+      any(iabp),
+    
+    pevad =
+      any(pevad),
+    
+    inotrope_high =
+      any(inotrope_high),
+    
+    .groups = "drop"
+    
+  ) %>%
+  left_join(
+    listing_device_flag,
+    by = c(
+      "PX_ID",
+      "CAN_LISTING_DT"
+    )
+  ) %>%
+  mutate(
+    device_at_listing =
+      coalesce(
+        device_at_listing,
+        FALSE
+      )
+  )
+```
+
+
+```{r}
+#THE ACTUAL TABLE
+#creaty study cohort
+study <- cand %>%
+  filter(
+    WL_ORG == "HR",
+    CAN_AGE_AT_LISTING >= 18,
+    (
+      CAN_LISTING_DT >= as.Date("2024-09-22") &
+        CAN_LISTING_DT <= as.Date("2025-02-28")
+    ) |
+      (
+        CAN_LISTING_DT >= as.Date("2025-09-22") &
+          CAN_LISTING_DT <= as.Date("2026-02-28")
+      )
+  ) %>%
+  mutate(
+    
+    PX_ID = as.character(PX_ID),
+    
+    policy_group =
+      if_else(
+        CAN_LISTING_DT <
+          as.Date("2025-09-17"),
+        "Pre",
+        "Post"
+      )
+  )
+
+#merge lisitng base
+study <- study %>%
+  left_join(
+    
+    listing_base %>%
+      select(
+        PX_ID,
+        CAN_LISTING_DT,
+        exception,
+        iabp,
+        pevad,
+        inotrope_high,
+        device_at_listing
+      ),
+    
+    by = c(
+      "PX_ID",
+      "CAN_LISTING_DT"
+    )
+    
+  ) %>%
+  
+  mutate(
+    
+    exception =
+      factor(
+        if_else(
+          coalesce(exception, FALSE),
+          "Yes",
+          "No"
+        )
+      ),
+    
+    iabp =
+      factor(
+        if_else(
+          coalesce(iabp, FALSE),
+          "Yes",
+          "No"
+        )
+      ),
+    
+    pevad =
+      factor(
+        if_else(
+          coalesce(pevad, FALSE),
+          "Yes",
+          "No"
+        )
+      ),
+    
+    inotrope_high =
+      factor(
+        if_else(
+          coalesce(inotrope_high, FALSE),
+          "Yes",
+          "No"
+        )
+      )
+    
+  )
+```
+
+
+```{r}
+#table variables
+study <- study %>%
+  
+  mutate(
+    
+    policy_group =
+      factor(
+        policy_group,
+        levels = c(
+          "Pre",
+          "Post"
+        )
+      ),
+    
+    female =
+      factor(
+        if_else(
+          CAN_GENDER == "F",
+          "Female",
+          "Male"
+        )
+      ),
+    
+    race_table =
+      case_when(
+        
+        CAN_ETHNICITY_SRTR == "LATINO" ~
+          "Hispanic/Latino",
+        
+        CAN_RACE_SRTR == "WHITE" ~
+          "White",
+        
+        CAN_RACE_SRTR == "BLACK" ~
+          "Black",
+        
+        CAN_RACE_SRTR == "ASIAN" ~
+          "Asian",
+        
+        TRUE ~
+          "Other"
+        
+      ),
+    
+    race_table =
+      factor(
+        
+        race_table,
+        
+        levels =
+          c(
+            "White",
+            "Black",
+            "Asian",
+            "Hispanic/Latino",
+            "Other"
+          )
+        
+      ),
+    
+    blood_type =
+      factor(
+        
+        if_else(
+          CAN_ABO == "O",
+          "O",
+          "Non-O"
+        ),
+        
+        levels =
+          c(
+            "Non-O",
+            "O"
+          )
+        
+      ),
+    
+    listing_status =
+      factor(
+        
+        CAN_INIT_STAT,
+        
+        levels =
+          c(
+            2110,
+            2120,
+            2130,
+            2140,
+            2150,
+            2160,
+            2999
+          ),
+        
+        labels =
+          c(
+            "Status 1",
+            "Status 2",
+            "Status 3",
+            "Status 4",
+            "Status 5",
+            "Status 6",
+            "Temporarily Inactive"
+          )
+        
+      )
+    
+  )
+
+study <- study %>%
+  mutate(
+    exception_with_device =
+      factor(
+        if_else(
+          exception == "Yes" & device_at_listing,
+          "Yes",
+          "No"
+        )
+      ),
+    
+    exception_without_device =
+      factor(
+        if_else(
+          exception == "Yes" & !device_at_listing,
+          "Yes",
+          "No"
+        )
+      )
+  )
+```
+
+
+```{r}
+#table 1
+table1 <-
+  
+  study %>%
+  
+  select(
+    
+    policy_group,
+    
+    CAN_AGE_AT_LISTING,
+    
+    CAN_BMI,
+    
+    female,
+    
+    race_table,
+    
+    blood_type,
+    
+    listing_status,
+    
+    exception,
+    
+    exception_with_device,
+    
+    exception_without_device,
+    
+    iabp,
+    
+    pevad,
+    
+    inotrope_high
+  ) %>%
+  
+  tbl_summary(
+    
+    by = policy_group,
+    
+    statistic =
+      list(
+        
+        all_continuous() ~
+          "{median} ({p25}, {p75})",
+        
+        all_categorical() ~
+          "{n} ({p}%)"
+        
+      ),
+    
+    digits =
+      list(
+        all_continuous() ~ 1
+      ),
+    
+    missing = "no",
+    
+    label =
+      list(
+        
+        CAN_AGE_AT_LISTING ~
+          "Age (years)",
+        
+        CAN_BMI ~
+          "BMI (kg/m²)",
+        
+        female ~
+          "Sex",
+        
+        race_table ~
+          "Race",
+        
+        blood_type ~
+          "Blood Type",
+        
+        listing_status ~
+          "Initial Listing Status",
+        
+        exception ~
+          "Status 2 Exception",
+        
+        exception_with_device ~
+          "Status 2 Exception with IABP/PEVAD",
+        
+        exception_without_device ~
+          "Status 2 Exception without IABP/PEVAD",
+        
+        iabp ~
+          "Status 2 IABP",
+        
+        pevad ~
+          "Status 2 PEVAD"
+        
+      )
+    
+  ) %>%
+  
+  add_p() %>%
+  
+  bold_labels()
+
+study <- study %>%
+  mutate(
+    exception_with_device =
+      factor(if_else(exception == "Yes" & device_at_listing, "Yes", "No")),
+    
+    exception_without_device =
+      factor(if_else(exception == "Yes" & !device_at_listing, "Yes", "No"))
+  )
+
+grep("PX", names(cand), value = TRUE)
+grep("WL", names(cand), value = TRUE)
+grep("LIST", names(cand), value = TRUE)
+names(cand)
+dim(cand)
+
+names(JustFormHR)
+names(JustFormHRStat2)
+names(JustFormHRDataLink)
+
+```
+
+```{r}
+#individual chi-square tests for Status 1-3
+
+chisq.test(table(study$policy_group, study$CAN_INIT_STAT == 2110))
+
+chisq.test(table(study$policy_group, study$CAN_INIT_STAT == 2120))
+
+chisq.test(table(study$policy_group, study$CAN_INIT_STAT == 2130))
+
+library(purrr)
+
+status_p <- tibble::tibble(
+  variable = "listing_status",
+  label    = c("Status 1", "Status 2", "Status 3"),
+  p_lvl    = map_dbl(
+    c(2110, 2120, 2130),
+    ~ chisq.test(table(study$policy_group, study$CAN_INIT_STAT == .x))$p.value
+  )
+)
+
+table1 <- table1 %>%
+  modify_table_body(
+    ~ .x %>%
+      dplyr::left_join(status_p, by = c("variable", "label")) %>%
+      dplyr::mutate(p.value = dplyr::coalesce(p.value, p_lvl)) %>%
+      dplyr::select(-p_lvl)
+  )
+
+print(table1)
+```
