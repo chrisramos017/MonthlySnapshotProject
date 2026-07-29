@@ -2,4 +2,6 @@ This is the publicly available GitHub repository for the manuscript "Changes in 
 
 The "markdown_table_1.Rmd" file constructs the seasonally matched pre- and post-policy cohorts and produces Table 1. The table reports candidate demographics, initial listing status, and five allocation criteria at listing derived from justification form qualifications and device implant records, with Wilcoxon rank-sum tests for continuous variables and Pearson chi-squared tests for categorical variables.
 
-The "figures.Rmd" file 
+The "figures.Rmd" file produces monthly and weekly plots of new adult heart waitlist listings, stratified by initial listing status, from September 2024 through February 2026.
+
+The "Incidence_Snapshot_final.Rmd" file produces weekly and monthly plots of new adult heart listings by qualifying pathway — Status 2 via exception, IABP, or PEVAD; Status 3 via high-dose inotropes; and listings with an IABP/PEVAD implanted. Also provides weekly and monthly plots of Status 2 exception listings stratified by the presence of an IABP/PEVAD at listing. Lastly, it also produces a diagnostic histogram of the interval between each candidate's listing date and their nearest justification form.
